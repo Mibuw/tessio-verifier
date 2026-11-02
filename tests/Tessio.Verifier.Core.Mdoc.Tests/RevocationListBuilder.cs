@@ -109,6 +109,9 @@ internal sealed class RevocationListBuilder : IDisposable
     /// <summary>Signs with this key instead of the signer certificate's.</summary>
     public ECDsa? SignWith { get; set; }
 
+    /// <summary>Signs under ESP256 (-9) instead of the algorithm the key and hash pick.</summary>
+    public bool Esp256Signature { get; set; }
+
     public byte[] StatusList(string uri, int bits, params int[] statuses)
     {
         var packed = new byte[(statuses.Length * bits + 7) / 8];
@@ -265,9 +268,11 @@ internal sealed class RevocationListBuilder : IDisposable
         }
 
         var signer = new CoseSigner(SignWith ?? SignerKey, Hash, protectedHeaders, unprotectedHeaders);
-        return Detached
-            ? CoseSign1Message.SignDetached(claims.Encode(), signer)
-            : CoseSign1Message.SignEmbedded(claims.Encode(), signer);
+        var claimsBytes = claims.Encode();
+        var signed = Detached
+            ? CoseSign1Message.SignDetached(claimsBytes, signer)
+            : CoseSign1Message.SignEmbedded(claimsBytes, signer);
+        return Esp256Signature ? Esp256.Resign(signed, SignWith ?? SignerKey, Detached ? claimsBytes : null) : signed;
     }
 
     private byte[] EncodeChain()

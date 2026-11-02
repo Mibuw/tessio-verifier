@@ -38,10 +38,13 @@ internal sealed record MsoRevocationListToken(
     // ES512 with P-521, and the brainpool ESB256, ESB384 and ESB512. Each algorithm is held to the curve the
     // requirement names, because the platform verifies an ES256 signature over any curve's key. The platform's
     // COSE implementation does not know the ESB identifiers, so a list declaring one is refused rather than
-    // accepted unread.
+    // accepted unread. EAA-6.2.10.1-08 names algorithms, not COSE numbers. ESP256 (-9, RFC 9864) is the same
+    // "ECDSA with curve NIST P-256 and SHA-256" under the identifier that fixes its curve, and HAIP 1.0 section 7
+    // has a verifier validate status information with -7 or -9.
     private static readonly Dictionary<int, string> CurveOfAlgorithm = new()
     {
         [-7] = "1.2.840.10045.3.1.7", // ES256, NIST P-256
+        [CoseSign1Verification.Esp256] = "1.2.840.10045.3.1.7", // ESP256, NIST P-256
         [-35] = "1.3.132.0.34", // ES384, NIST P-384
         [-36] = "1.3.132.0.35", // ES512, NIST P-521
     };
@@ -92,10 +95,9 @@ internal sealed record MsoRevocationListToken(
         var message = CoseMessage.DecodeSign1(body);
         var expectedType = TypeOf(kind);
 
-        if (!message.ProtectedHeaders.TryGetValue(CoseHeaderLabel.Algorithm, out var alg)
-            || !CurveOfAlgorithm.TryGetValue(alg.GetValueAsInt32(), out var curve))
+        if (CoseSign1Verification.Algorithm(message) is not { } alg || !CurveOfAlgorithm.TryGetValue(alg, out var curve))
         {
-            throw new InvalidListException("The MSO revocation list's algorithm is not one of ES256, ES384 or ES512.");
+            throw new InvalidListException("The MSO revocation list's algorithm is not one of ES256, ES384, ES512 or ESP256.");
         }
 
         // SPEC: RFC 9052 section 3.1, crit names the protected header parameters "an application that is processing
@@ -141,7 +143,7 @@ internal sealed record MsoRevocationListToken(
             throw new InvalidListException("The MSO revocation list's signing key is not on the curve its algorithm names.");
         }
 
-        if (!message.VerifyEmbedded(key))
+        if (!CoseSign1Verification.VerifyEmbedded(message, key))
         {
             throw new InvalidListException("The MSO revocation list's signature does not verify.");
         }

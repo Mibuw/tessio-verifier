@@ -23,7 +23,11 @@ internal sealed record IssuerAuthResolution
 // SPEC: ISO/IEC 18013-5 §9.3.1 — issuer data authentication.
 internal static class IssuerAuthVerifier
 {
-    private static readonly int[] AllowedCoseAlgorithms = [-7, -35, -36]; // ES256, ES384, ES512
+    // ES256, ES384, ES512, and ESP256 (-9). HAIP 1.0 section 7 requires -9 of a verifier only for the
+    // deviceSignature and status information, not for issuerAuth. It is accepted here because it is the ES256
+    // algorithm already on this list, under the identifier that fixes its curve (RFC 9864), so it adds a name
+    // and no new cryptography.
+    private static readonly int[] AllowedCoseAlgorithms = [-7, -35, -36, CoseSign1Verification.Esp256];
 
     public static IssuerAuthResolution Verify(byte[] issuerAuth)
     {
@@ -37,11 +41,16 @@ internal static class IssuerAuthVerifier
             throw new MdocProcessingException(MdocErrorCodes.MsoInvalid, $"issuerAuth is not a valid COSE_Sign1: {e.Message}");
         }
 
-        if (!message.ProtectedHeaders.TryGetValue(CoseHeaderLabel.Algorithm, out var algValue)
-            || !AllowedCoseAlgorithms.Contains(algValue.GetValueAsInt32()))
+        if (CoseSign1Verification.Algorithm(message) is not { } alg || !AllowedCoseAlgorithms.Contains(alg))
         {
             throw new MdocProcessingException(
-                MdocErrorCodes.AlgorithmNotAllowed, "The issuerAuth algorithm is not on the ES256/ES384/ES512 allowlist.");
+                MdocErrorCodes.AlgorithmNotAllowed, "The issuerAuth algorithm is not on the ES256/ES384/ES512/ESP256 allowlist.");
+        }
+
+        // The MSO is the payload; DeviceResponseParser.ParseMso reads it, but only after this signature check.
+        if (message.Content is null)
+        {
+            throw new MdocProcessingException(MdocErrorCodes.MsoInvalid, "issuerAuth carries no embedded payload.");
         }
 
         var chain = ReadX5Chain(message);
@@ -58,7 +67,7 @@ internal static class IssuerAuthVerifier
 
             using (key)
             {
-                if (!message.VerifyEmbedded(key))
+                if (!CoseSign1Verification.VerifyEmbedded(message, key))
                 {
                     throw new MdocProcessingException(
                         MdocErrorCodes.SignatureInvalid, "The issuerAuth signature does not verify against the Document Signer key.");

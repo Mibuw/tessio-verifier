@@ -35,8 +35,15 @@ internal static class DeviceAuthVerifier
         try
         {
             var message = CoseMessage.DecodeSign1(deviceSigned.DeviceSignature);
+            // The signed bytes are DeviceAuthentication, which the verifier rebuilds from this request, so the
+            // signature is checked detached. One carrying a payload of its own is not that signature.
+            if (message.Content is not null)
+            {
+                return [Error("The deviceSignature carries its payload; it must be detached.")];
+            }
+
             using var deviceKey = ECDsa.Create(CoseKey.ReadEc2PublicKey(mso.DeviceKeyEncoded));
-            if (!message.VerifyDetached(deviceKey, deviceAuthenticationBytes))
+            if (!CoseSign1Verification.VerifyDetached(message, deviceKey, deviceAuthenticationBytes))
             {
                 return [Error("The deviceSignature does not verify over this request's session transcript.")];
             }
