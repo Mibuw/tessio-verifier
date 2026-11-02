@@ -15,7 +15,7 @@
   </PropertyGroup>
 
   <PropertyGroup Label="NuGet metadata">
-    <Version>0.28.2</Version>
+    <Version>0.28.3</Version>
     <Authors>Triple Down AB</Authors>
     <Company>Triple Down AB</Company>
     <Product>Tessio.Verifier</Product>
