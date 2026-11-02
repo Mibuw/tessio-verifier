@@ -118,6 +118,21 @@ internal sealed class MdocTestBuilder : IDisposable
     /// <summary>Signs deviceAuth with this key instead of the MSO's device key (holder mismatch).</summary>
     public ECDsa? DeviceSignerOverride { get; set; }
 
+    /// <summary>Signs issuerAuth under ESP256 (-9) instead of ES256 (-7).</summary>
+    public bool IssuerAuthEsp256 { get; set; }
+
+    /// <summary>Signs the deviceSignature under ESP256 (-9) instead of ES256 (-7).</summary>
+    public bool DeviceSignatureEsp256 { get; set; }
+
+    /// <summary>Signs issuerAuth with its payload detached, which no valid mdoc does.</summary>
+    public bool IssuerAuthDetached { get; set; }
+
+    /// <summary>Signs the deviceSignature with its payload embedded, which no valid mdoc does.</summary>
+    public bool DeviceSignatureEmbedded { get; set; }
+
+    /// <summary>Writes issuerAuth's protected alg as this text instead of an integer.</summary>
+    public string? IssuerAuthTextAlg { get; set; }
+
     /// <summary>Emits a deviceMac instead of a deviceSignature.</summary>
     public bool UseDeviceMac { get; set; }
 
@@ -190,8 +205,14 @@ internal sealed class MdocTestBuilder : IDisposable
 
         var transcript = SessionTranscriptBuilder.Build(ClientId, Nonce, EncryptionKeyThumbprint, ResponseUri);
         var deviceAuthBytes = SessionTranscriptBuilder.BuildDeviceAuthenticationBytes(transcript, DocType, encodedNameSpaces);
-        var signature = CoseSign1Message.SignDetached(
-            deviceAuthBytes, new CoseSigner(DeviceSignerOverride ?? _deviceKey, HashAlgorithmName.SHA256));
+        var deviceSigner = new CoseSigner(DeviceSignerOverride ?? _deviceKey, HashAlgorithmName.SHA256);
+        var signature = DeviceSignatureEmbedded
+            ? CoseSign1Message.SignEmbedded(deviceAuthBytes, deviceSigner)
+            : CoseSign1Message.SignDetached(deviceAuthBytes, deviceSigner);
+        if (DeviceSignatureEsp256)
+        {
+            signature = Esp256.Resign(signature, DeviceSignerOverride ?? _deviceKey, deviceAuthBytes);
+        }
 
         w.WriteTextString("deviceSigned");
         w.WriteStartMap(2);
@@ -294,7 +315,15 @@ internal sealed class MdocTestBuilder : IDisposable
         var signer = new CoseSigner(SignerKeyOverride ?? _dsKey, HashAlgorithmName.SHA256);
         // SPEC: RFC 9360 — x5chain at header label 33; DS certificate first, then the chain.
         signer.UnprotectedHeaders.Add(new CoseHeaderLabel(33), CoseHeaderValue.FromEncodedValue(EncodeChain()));
-        return CoseSign1Message.SignEmbedded(payload.Encode(), signer);
+        var issuerAuth = IssuerAuthDetached
+            ? CoseSign1Message.SignDetached(payload.Encode(), signer)
+            : CoseSign1Message.SignEmbedded(payload.Encode(), signer);
+        if (IssuerAuthTextAlg is { } textAlg)
+        {
+            return Esp256.ResignWithTextAlg(issuerAuth, SignerKeyOverride ?? _dsKey, textAlg);
+        }
+
+        return IssuerAuthEsp256 ? Esp256.Resign(issuerAuth, SignerKeyOverride ?? _dsKey) : issuerAuth;
     }
 
     private byte[] EncodeChain()

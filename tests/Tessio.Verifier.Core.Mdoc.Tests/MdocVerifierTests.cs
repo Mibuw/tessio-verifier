@@ -46,6 +46,88 @@ public sealed class MdocVerifierTests : IDisposable
         Assert.Equal(true, elements["age_over_18"]);
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task AnMdocSignedUnderEsp256_Verifies(bool issuerAuth, bool deviceSignature)
+    {
+        // SPEC: HAIP 1.0 section 7, verifiers support COSE -7 "or -9, as applicable". RFC 9864 registers -9 as
+        // ESP256, ECDSA on P-256 with SHA-256, which the platform's COSE implementation does not know.
+        _builder.IssuerAuthEsp256 = issuerAuth;
+        _builder.DeviceSignatureEsp256 = deviceSignature;
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Code}: {e.Message}")));
+    }
+
+    [Fact]
+    public async Task AnIssuerAuthUnderEsp256_ByAnotherKey_IsRefused()
+    {
+        using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        _builder.IssuerAuthEsp256 = true;
+        _builder.SignerKeyOverride = other;
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.SignatureInvalid);
+    }
+
+    [Fact]
+    public async Task ADeviceSignatureUnderEsp256_ByAnotherKey_IsRefused()
+    {
+        using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        _builder.DeviceSignatureEsp256 = true;
+        _builder.DeviceSignerOverride = other;
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.DeviceAuthInvalid);
+    }
+
+    [Fact]
+    public async Task ADetachedIssuerAuth_IsRefused_NotThrown()
+    {
+        // The signature is checked before the MSO is read, and the platform throws InvalidOperationException for
+        // an embedded check of a detached message. That used to escape VerifyAsync.
+        _builder.IssuerAuthDetached = true;
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.MsoInvalid);
+    }
+
+    [Fact]
+    public async Task AnIssuerAuthWithATextAlg_IsRefused_NotThrown()
+    {
+        // Reading a text alg as an integer throws InvalidOperationException, which used to escape VerifyAsync.
+        _builder.IssuerAuthTextAlg = "ES256";
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.AlgorithmNotAllowed);
+    }
+
+    [Fact]
+    public async Task ADeviceSignatureCarryingItsPayload_IsRefused_NotThrown()
+    {
+        // The platform throws InvalidOperationException for a detached check of a message with content, and the
+        // device check caught only CryptographicException and ArgumentException.
+        _builder.DeviceSignatureEmbedded = true;
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        // Named for what is wrong, rather than "does not verify", which would send a wallet developer to the key.
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.DeviceAuthInvalid
+            && e.Message.Contains("must be detached", StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task ExternalSessionTranscript_IsUsedVerbatimForDeviceAuth()
     {

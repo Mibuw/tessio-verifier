@@ -69,6 +69,30 @@ public sealed partial class MsoRevocationTests : IDisposable
     }
 
     [Fact]
+    public async Task AListSignedUnderEsp256_IsRead()
+    {
+        // SPEC: HAIP 1.0 section 7 names COSE -9 beside -7 for status information.
+        _list.Esp256Signature = true;
+        _builder.MsoStatus = RevocationListBuilder.StatusListReference(2, ListUri);
+        _http.Serve(ListUri, _list.StatusList(ListUri, bits: 1, 0, 0, 1));
+
+        // Read, not merely accepted: entry 2 is revoked, which is only known once the signature verified.
+        AssertRefused(await VerifyAsync(), ErrorCodes.CredentialRevoked);
+    }
+
+    [Fact]
+    public async Task AListSignedUnderEsp256_ByAnotherKey_IsRefused()
+    {
+        using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        _list.Esp256Signature = true;
+        _list.SignWith = other;
+        _builder.MsoStatus = RevocationListBuilder.StatusListReference(0, ListUri);
+        _http.Serve(ListUri, _list.StatusList(ListUri, bits: 1, 0));
+
+        AssertRefused(await VerifyAsync(), ErrorCodes.StatusInvalid);
+    }
+
+    [Fact]
     public async Task StatusList_RevokedEntry_Fails()
     {
         _builder.MsoStatus = RevocationListBuilder.StatusListReference(2, ListUri);
