@@ -48,10 +48,15 @@ internal static class MsoRevocationListClaims
                     iat = ReadNumericDate(reader);
                     break;
                 case TtlClaim:
+                    // SPEC: draft-ietf-oauth-status-list-20 section 5.2, ttl is an unsigned integer. One past long
+                    // saturates rather than refuses, as the JWT path's does: it is valid, only longer than any cache.
                     var ttlValue = reader.ReadUInt64();
-                    ttl = ttlValue is > 0 and <= long.MaxValue
-                        ? (long)ttlValue
-                        : throw new MsoRevocationListToken.InvalidListException("The MSO revocation list's ttl is not a positive integer.");
+                    ttl = ttlValue switch
+                    {
+                        0 => throw new MsoRevocationListToken.InvalidListException("The MSO revocation list's ttl is not a positive integer."),
+                        > long.MaxValue => long.MaxValue,
+                        _ => (long)ttlValue,
+                    };
                     break;
                 case StatusListClaim:
                     sawStatusList = true;

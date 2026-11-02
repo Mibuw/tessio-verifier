@@ -8,7 +8,7 @@ namespace Tessio.Verifier.Core;
 /// SD-JWT VC checker (JWT tokens) and the mdoc revocation checker (CWT tokens), so the two read a list
 /// the same way.
 /// </summary>
-// SPEC: draft-ietf-oauth-status-list-18 and -20 agree on every rule here: section 4.1 (bit packing), section
+// SPEC: draft-ietf-oauth-status-list-20, section 4.1 (bit packing), section
 // 7.1 (registered values), section 8.3 steps 4d, 5 and 6 (ttl, decompression, an out-of-range index rejects)
 // and section 13.7 (caching).
 internal static class StatusListValues

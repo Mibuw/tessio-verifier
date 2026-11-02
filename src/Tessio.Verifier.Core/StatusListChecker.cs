@@ -16,10 +16,11 @@ namespace Tessio.Verifier.Core;
 /// per uri for min(cache duration, the token's <c>ttl</c> claim, its <c>exp</c>); failures are
 /// never cached, so an unresolvable status stays fail-closed on every attempt.
 /// </summary>
-// SPEC: draft-ietf-oauth-status-list-18: §6.2 (status claim), §5.1 (status list token in JWT
+// SPEC: draft-ietf-oauth-status-list-20: §6.2 (status claim), §5.1 (status list token in JWT
 // format), §8.3 (Relying Party validation rules), §4.1/§4.2 (bit packing and compression),
-// §8.3 step 4d and §13.7 (ttl-driven caching). Every bare section number in this file means -18.
-// HAIP 1.0 cites -14, and -18 is the stricter of the two: it makes an out-of-range index a MUST reject.
+// §8.3 step 4d and §13.7 (ttl-driven caching). Every bare section number in this file means -20.
+// -20 is the draft CIR (EU) 2026/1731 pins for the status member of an SD-JWT VC (its Annex IV,
+// adaptations (1) and (5), replacing Annex II of 2024/2979). HAIP 1.0 cites -14.
 internal sealed class StatusListChecker
 {
     private const string StatusListTyp = "statuslist+jwt";
@@ -182,7 +183,7 @@ internal sealed class StatusListChecker
         //
         // WHAT THE SPECIFICATIONS REQUIRE, and the normative weight of each.
         //
-        // draft-ietf-oauth-status-list-18 section 8.3 is the Relying Party's MUST list. Signer identity is
+        // draft-ietf-oauth-status-list-20 section 8.3 is the Relying Party's MUST list. Signer identity is
         // not on it. The only binding it requires to the referenced token is "The subject claim (sub or
         // 2) of the Status List Token MUST be equal to the uri claim in the status_list object".
         //
@@ -265,21 +266,58 @@ internal sealed class StatusListChecker
             return [Error(ErrorCodes.StatusInvalid, "The status list token sub does not match the referenced uri.")];
         }
 
-        // SPEC: §8.3 — when exp is present, an expired status list token MUST be rejected.
-        DateTimeOffset? expiresAt = null;
-        if (token.TryGetClaim("exp", out var expClaim)
-            && long.TryParse(expClaim.Value, System.Globalization.CultureInfo.InvariantCulture, out var expSeconds))
+        // Read from the JSON itself rather than from the handler's claims, which turn a string "300.5" and the
+        // number 300.5 into the same text: §5.1 says what JSON type each claim is, and §8.3 step 4 says "All
+        // existing claims in the Status List Token MUST be checked according to the rules in Section 5.1".
+        using var payloadDoc = JsonDocument.Parse(Base64UrlEncoder.Decode(token.EncodedPayload));
+        var claims = payloadDoc.RootElement;
+
+        // SPEC: §5.1 — iat is REQUIRED, and §8.3 step 3b says to "Check for the existence of the required claims".
+        if (!claims.TryGetProperty("iat", out var iat))
         {
-            expiresAt = UnixTime.FromSeconds(expSeconds);
-            if (_clock.GetUtcNow() - _clockSkew >= expiresAt)
+            return [Error(ErrorCodes.StatusInvalid, "The status list token lacks the required iat claim.")];
+        }
+
+        // iat, exp and nbf are NumericDates (RFC 7519 section 2), so JSON numbers. A string is refused rather than
+        // read, which the handler's claims would do.
+        var hasExp = claims.TryGetProperty("exp", out var exp);
+        var hasNbf = claims.TryGetProperty("nbf", out var nbf);
+        if (!IsNumericDate(iat) || (hasExp && !IsNumericDate(exp)) || (hasNbf && !IsNumericDate(nbf)))
+        {
+            return [Error(ErrorCodes.StatusInvalid, "The status list token carries an iat, exp or nbf that is not a number.")];
+        }
+
+        // SPEC: §5.1 — ttl, if present, "MUST be a positive number encoded in JSON as a number". Refused
+        // otherwise, as the mdoc path refuses a non-positive one. A fractional one is a number like any other.
+        long? ttlSeconds = null;
+        if (claims.TryGetProperty("ttl", out var ttl))
+        {
+            if (!TryReadPositiveSeconds(ttl, out var seconds))
             {
-                return [Error(ErrorCodes.StatusUnresolvable, "The status list token is expired; current status is unknown.")];
+                return [Error(ErrorCodes.StatusInvalid, "The status list token's ttl is not a positive number.")];
             }
+
+            ttlSeconds = seconds;
+        }
+
+        // SPEC: §8.3 — when exp is present, an expired status list token MUST be rejected.
+        var now = _clock.GetUtcNow();
+        DateTimeOffset? expiresAt = hasExp ? NumericDate(exp) : null;
+        if (expiresAt is { } expiry && now - _clockSkew >= expiry)
+        {
+            return [Error(ErrorCodes.StatusUnresolvable, "The status list token is expired; current status is unknown.")];
+        }
+
+        // SPEC: §5.1 — "Relying Parties MUST reject JWTs that are not valid in all other respects per "JSON Web
+        // Token (JWT)" [RFC7519]", and RFC 7519 section 4.1.5 does not accept a token before its nbf. Lifetime
+        // validation is off above, so it is checked here, answered as the mdoc path answers a list not valid yet.
+        if (hasNbf && now + _clockSkew < NumericDate(nbf))
+        {
+            return [Error(ErrorCodes.StatusUnresolvable, "The status list token is not valid yet; current status is unknown.")];
         }
 
         // SPEC: §4.2 — status_list: { "bits": 1|2|4|8, "lst": base64url(zlib-deflate(bytes)) }.
-        using var payloadDoc = JsonDocument.Parse(Base64UrlEncoder.Decode(token.EncodedPayload));
-        if (!payloadDoc.RootElement.TryGetProperty("status_list", out var statusListProp)
+        if (!claims.TryGetProperty("status_list", out var statusListProp)
             || !statusListProp.TryGetProperty("bits", out var bitsProp)
             || !statusListProp.TryGetProperty("lst", out var lstProp)
             || !bitsProp.TryGetInt32(out var bits)
@@ -305,7 +343,7 @@ internal sealed class StatusListChecker
             return [decompressFailure!];
         }
 
-        CacheList(token, uri, bits, decompressed, expiresAt);
+        CacheList(uri, bits, decompressed, ttlSeconds, expiresAt);
         return StatusListValues.Evaluate(bits, decompressed, idx);
     }
 
@@ -315,15 +353,46 @@ internal sealed class StatusListChecker
     /// capped by its <c>exp</c>. A non-positive lifetime disables caching for this list.
     /// </summary>
     private void CacheList(
-        JsonWebToken token, string uri, int bits, byte[] list, DateTimeOffset? expiresAt)
+        string uri, int bits, byte[] list, long? ttlSeconds, DateTimeOffset? expiresAt)
     {
-        long? ttlSeconds = token.TryGetClaim("ttl", out var ttlClaim)
-            && long.TryParse(ttlClaim.Value, System.Globalization.CultureInfo.InvariantCulture, out var ttl)
-                ? ttl
-                : null;
         var now = _clock.GetUtcNow();
         var until = StatusListValues.CacheUntil(now, _cacheDuration, ttlSeconds, expiresAt);
         _cache.Set(uri, new CachedList(bits, list), until, now);
+    }
+
+    private static bool IsNumericDate(JsonElement value) => value.ValueKind == JsonValueKind.Number;
+
+    // SPEC: RFC 7519 section 2, a NumericDate may carry a fraction; whole seconds are enough here. A number past
+    // what a double holds takes the end its sign points to, read from the text, so a far nbf is still refused
+    // and no value throws (UnixTime saturates).
+    private static DateTimeOffset NumericDate(JsonElement value) =>
+        UnixTime.FromSeconds(
+            value.TryGetDouble(out var seconds) ? Math.Floor(seconds)
+            : value.GetRawText().StartsWith('-') ? double.NegativeInfinity : double.PositiveInfinity);
+
+    /// <summary>
+    /// The whole seconds of a ttl that is a positive JSON number. The sign and zero are read from the number's
+    /// own text, because a double cannot hold every number JSON can write: 1e-400 is positive but reads as 0,
+    /// and 1e400 is a valid number that reads as infinity. The first caches nothing, the second saturates.
+    /// </summary>
+    private static bool TryReadPositiveSeconds(JsonElement value, out long seconds)
+    {
+        seconds = 0;
+        if (value.ValueKind != JsonValueKind.Number)
+        {
+            return false;
+        }
+
+        var text = value.GetRawText();
+        var mantissa = text.Split('e', 'E')[0];
+        if (text.StartsWith('-') || mantissa.All(c => c is '0' or '.'))
+        {
+            return false;
+        }
+
+        var parsed = value.TryGetDouble(out var d) ? d : double.PositiveInfinity;
+        seconds = !double.IsFinite(parsed) || parsed >= long.MaxValue ? long.MaxValue : (long)Math.Floor(parsed);
+        return true;
     }
 
     private static VerificationError Error(string code, string message) => new() { Code = code, Message = message };

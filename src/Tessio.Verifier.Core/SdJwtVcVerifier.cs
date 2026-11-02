@@ -213,9 +213,8 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
         CheckTimeClaims(processed, errors);
         await CheckKeyBindingAsync(presentation, processed, context, transactionData, errors, ct).ConfigureAwait(false);
 
-        // Issuer trust on the x5c route: after every check that needs nothing but the credential, so a
-        // credential that fails one never reaches the seam, and before the status list, which is fetched
-        // only when trusted.
+        // Issuer trust on the x5c route: after every check that needs nothing but the credential, and before
+        // the status list, which is fetched only for a trusted credential that passed them all.
         if (trust is null)
         {
             (trust, trustFailure) = await TrustSeam.ResolveAsync(
@@ -224,10 +223,14 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
 
         var issuerInfo = IssuerInfoFrom(resolution, trust);
 
-        // SPEC: draft-ietf-oauth-status-list-18 §8.3, enforce the status claim when present (revocation).
-        // Only for a trusted issuer. The uri is the credential's own, and an untrusted credential fails
-        // whatever its status says.
-        if (_options.CheckStatus && trust.Trusted)
+        // SPEC: draft-ietf-oauth-status-list-20 §8.3, enforce the status claim when present (revocation), and
+        // "If the validation procedures for the Referenced Token determine it is invalid, further procedures
+        // regarding Status List MUST NOT be performed, e.g. fetching a Status List Token, unless the Referenced
+        // Token procedures or the use case require further evaluation". Verifying a presentation requires
+        // nothing more, so the list is fetched only for a credential that is otherwise valid, as on the mdoc
+        // path. Untrusted counts as not valid: the uri is the credential's own, and an untrusted
+        // credential fails whatever its status says.
+        if (_options.CheckStatus && trust.Trusted && errors.Count == 0)
         {
             errors.AddRange(await _statusChecker.CheckAsync(processed, ct).ConfigureAwait(false));
         }
