@@ -93,7 +93,7 @@ Run it, open the page, start a verification, and DEMO mode returns a verified `a
 - OpenID4VC High Assurance Interoperability Profile (HAIP) 1.0: <https://openid.net/specs/openid4vc-high-assurance-interoperability-profile-1_0.html>
 - EU Age Verification technical specification: <https://github.com/eu-digital-identity-wallet/av-doc-technical-specification>
 - SD-JWT VC: <https://datatracker.ietf.org/doc/html/draft-ietf-oauth-sd-jwt-vc-13>. Code citations name draft -13 because HAIP 1.0 lists it as a normative reference. Later drafts renumber the sections, so a section number means nothing without its draft number.
-- Token Status List: <https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-18>. HAIP 1.0 cites -14. The code follows -18 because -18 is stricter: it makes an out-of-range index a MUST reject.
+- Token Status List: <https://datatracker.ietf.org/doc/html/draft-ietf-oauth-status-list-20>, for SD-JWT VC and mdoc alike. Implementing Regulation (EU) 2026/1731 pins -20 for both (its Annex IV, adaptations (1), (5) and (6)). HAIP 1.0 cites -14.
 - mdoc revocation (MSO revocation lists, status list and identifier list): Implementing Regulation (EU) 2024/2979, Annex II as replaced by Implementing Regulation (EU) 2026/1731 (<https://eur-lex.europa.eu/eli/reg_impl/2026/1731/oj>, its Annex IV), adaptation (6): clause 6.2.10.1 of ETSI TS 119 472-1 V1.2.1 as adapted there. That annex pins Token Status List draft -20, which the mdoc code cites.
 - EUDI Architecture & Reference Framework: <https://github.com/eu-digital-identity-wallet/eudi-doc-architecture-and-reference-framework>
 - Relying party registration and access certificates: Implementing Regulation (EU) 2025/848, <https://eur-lex.europa.eu/eli/reg_impl/2025/848/oj>

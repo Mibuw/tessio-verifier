@@ -39,7 +39,7 @@ public sealed class SdJwtVcVerifierOptions
     /// present. Defaults to true — a revoked or suspended credential fails verification. Turn off
     /// only for offline scenarios where the status host is unreachable by design.
     /// </summary>
-    // SPEC: draft-ietf-oauth-status-list-18 §8.3: Relying Parties validate the referenced status.
+    // SPEC: draft-ietf-oauth-status-list-20 §8.3: Relying Parties validate the referenced status.
     public bool CheckStatus { get; set; } = true;
 
     /// <summary>
@@ -48,6 +48,6 @@ public sealed class SdJwtVcVerifierOptions
     /// 5 minutes — the window in which a freshly revoked credential could still verify. Set to
     /// <see cref="TimeSpan.Zero"/> to fetch on every verification.
     /// </summary>
-    // SPEC: draft-ietf-oauth-status-list-18 §8.3 step 4d and §13.7: ttl drives Relying Party caching.
+    // SPEC: draft-ietf-oauth-status-list-20 §8.3 step 4d and §13.7: ttl drives Relying Party caching.
     public TimeSpan StatusListCacheDuration { get; set; } = TimeSpan.FromMinutes(5);
 }

@@ -172,7 +172,7 @@ internal sealed class TestCredentialBuilder : IDisposable
 
         if (Status is { } status)
         {
-            // SPEC: draft-ietf-oauth-status-list-18 §6.2: the referenced-token status claim.
+            // SPEC: draft-ietf-oauth-status-list-20 §6.2: the referenced-token status claim.
             payload["status"] = new Dictionary<string, object>
             {
                 ["status_list"] = new Dictionary<string, object> { ["idx"] = status.Idx, ["uri"] = status.Uri },
@@ -265,7 +265,7 @@ internal sealed class TestCredentialBuilder : IDisposable
 
     /// <summary>
     /// Builds a signed Token Status List JWT for the given per-index status values, packed LSB-first
-    /// and zlib-deflate compressed per draft-ietf-oauth-status-list-18 §4.1/§4.2.
+    /// and zlib-deflate compressed per draft-ietf-oauth-status-list-20 §4.1/§4.2.
     /// </summary>
     /// <remarks>
     /// Set <c>signWith</c> to sign with that certificate's key and carry it in an <c>x5c</c> header.
@@ -275,8 +275,8 @@ internal sealed class TestCredentialBuilder : IDisposable
     /// after review found that gap.
     /// </remarks>
     public string BuildStatusListToken(
-        string uri, int bits, byte[] statuses, long? exp = null, string typ = "statuslist+jwt", string? sub = null,
-        long? ttl = null, X509Certificate2? signWith = null)
+        string uri, int bits, byte[] statuses, object? exp = null, string typ = "statuslist+jwt", string? sub = null,
+        object? ttl = null, X509Certificate2? signWith = null, bool includeIat = true, object? nbf = null, object? iat = null)
     {
         var packed = new byte[(statuses.Length * bits + 7) / 8];
         for (var i = 0; i < statuses.Length; i++)
@@ -299,16 +299,25 @@ internal sealed class TestCredentialBuilder : IDisposable
         {
             ["iss"] = Issuer,
             ["sub"] = sub ?? uri,
-            ["iat"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
             ["status_list"] = new Dictionary<string, object>
             {
                 ["bits"] = bits,
                 ["lst"] = Base64UrlEncoder.Encode(compressed),
             },
         };
+        if (includeIat)
+        {
+            claims["iat"] = iat ?? DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        }
+
         if (exp is { } expValue)
         {
             claims["exp"] = expValue;
+        }
+
+        if (nbf is { } nbfValue)
+        {
+            claims["nbf"] = nbfValue;
         }
 
         if (ttl is { } ttlValue)

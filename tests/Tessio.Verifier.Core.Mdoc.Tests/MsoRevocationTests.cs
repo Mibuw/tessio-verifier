@@ -496,12 +496,14 @@ public sealed partial class MsoRevocationTests : IDisposable
         AssertRefused(await VerifyAsync(), ErrorCodes.StatusInvalid);
     }
 
-    [Fact]
-    public async Task AHugeTtl_IsCappedNotThrown()
+    [Theory]
+    [InlineData(ulong.MaxValue >> 1)] // long.MaxValue
+    [InlineData(ulong.MaxValue)] // a valid unsigned integer past long, which used to be refused as not positive
+    public async Task AHugeTtl_IsCappedNotThrown(ulong ttl)
     {
         // A ttl past what a TimeSpan holds neither throws nor outlives the configured five minutes.
         var clock = new MovableClock(DateTimeOffset.UtcNow);
-        _list.Ttl = ulong.MaxValue >> 1;
+        _list.Ttl = ttl;
         _builder.MsoStatus = RevocationListBuilder.StatusListReference(0, ListUri);
         _http.Serve(ListUri, _list.StatusList(ListUri, bits: 1, 0));
         var verifier = new MdocVerifier(

@@ -15,7 +15,7 @@ namespace Tessio.Verifier.Core;
 /// <remarks>
 /// SPEC: draft-ietf-oauth-sd-jwt-vc-13 §10.1 requires the verifier to "validate the URL to ensure that it
 /// is a valid HTTPS URL and that it does not point to internal resources", including after DNS
-/// resolution, and to make the request "in a time-bound and size-bound manner". Token Status List -18
+/// resolution, and to make the request "in a time-bound and size-bound manner". Token Status List -20
 /// says nothing equivalent. The same rules apply there because the uri comes from the same credential.
 /// <para>
 /// The address check runs inside the connection, on the addresses the socket then connects to, not on
@@ -35,7 +35,7 @@ internal static class OutboundFetch
 
     /// <summary>
     /// The largest status list token read: the size the JWT handler that validates it will accept.
-    /// The draft sets no limit (-18 §13.4), but a larger token would be read whole only to be refused
+    /// The draft sets no limit (-20 §13.4), but a larger token would be read whole only to be refused
     /// by that handler, with a message about the signature rather than the size.
     /// </summary>
     internal const long MaxStatusListTokenBytes = TokenValidationParameters.DefaultMaximumTokenSizeInBytes;

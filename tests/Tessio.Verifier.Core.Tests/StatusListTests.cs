@@ -5,7 +5,7 @@ using Tessio.Verifier.Trust;
 namespace Tessio.Verifier.Core.Tests;
 
 /// <summary>
-/// Token Status List enforcement (draft-ietf-oauth-status-list-18): revoked and suspended credentials
+/// Token Status List enforcement (draft-ietf-oauth-status-list-20): revoked and suspended credentials
 /// fail verification, unreachable or forged status lists fail closed, and the bit packing follows
 /// the spec's LSB-first layout.
 /// </summary>
@@ -115,7 +115,7 @@ public class StatusListTests
     [Fact]
     public async Task IndexOutsideTheList_IsRejected()
     {
-        // SPEC: draft-ietf-oauth-status-list-18 section 8.3 step 6: an index out of bounds of the list
+        // SPEC: draft-ietf-oauth-status-list-20 section 8.3 step 6: an index out of bounds of the list
         // "MUST be rejected". Draft -14 said SHOULD. Four 1-bit entries pack into one byte, which holds
         // indices 0 to 7, so 8 is the first index outside it.
         using var builder = CredentialWithStatus(idx: 8);
@@ -264,7 +264,7 @@ public class StatusListTests
         Assert.DoesNotContain(ErrorCodes.StatusInvalid, codes);
     }
 
-    // SPEC: draft-ietf-oauth-status-list-18 section 1: "The Status Issuer can be either the Issuer or an
+    // SPEC: draft-ietf-oauth-status-list-20 section 1: "The Status Issuer can be either the Issuer or an
     // entity that has been authorized by the Issuer to issue Status List Tokens." The issuer authorises
     // by putting that uri inside the credential it signs, so a different BUT TRUSTED signer serving that
     // uri is the delegation the specification describes, not an attack.
@@ -298,15 +298,15 @@ public class StatusListTests
 
     /// <summary>
     /// The trust seam failing for the STATUS SIGNER, while the credential's own issuer is decided, is
-    /// reported as the status being unresolvable, and every other error found so far is kept.
+    /// reported as the status being unresolvable, with the cause, and as nothing else. The credential is
+    /// otherwise valid, because draft-20 §8.3 fetches no status list for one that is not.
     /// </summary>
     [Theory]
     [InlineData("http")]
     [InlineData("not ready")]
-    public async Task StatusSignerTrust_Failing_IsStatusUnresolvable_AndKeepsTheOtherErrors(string kind)
+    public async Task StatusSignerTrust_Failing_IsStatusUnresolvable(string kind)
     {
         using var builder = CredentialWithStatus(idx: 0);
-        builder.KbNonce = "wrong-nonce";
         using var signer = SelfSignedStatusSigner("status-signer");
         var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], signWith: signer);
         Exception failure = kind == "http"
@@ -321,11 +321,10 @@ public class StatusListTests
         var result = await new SdJwtVcVerifier(trust, options: null, new HttpClient(http)).VerifyAsync(
             new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
 
-        var codes = result.Errors.Select(e => e.Code).ToList();
-        Assert.Contains("status_unresolvable", codes);
-        Assert.Contains("nonce_mismatch", codes);
-        Assert.DoesNotContain("structure_invalid", codes);
-        Assert.Contains("trust list unreachable", result.Errors.Single(e => e.Code == "status_unresolvable").Message, StringComparison.Ordinal);
+        Assert.False(result.IsValid);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("status_unresolvable", error.Code);
+        Assert.Contains("trust list unreachable", error.Message, StringComparison.Ordinal);
     }
 
     /// <summary>Trusts any identifier asked about with no chain, and fails for any chain.</summary>
@@ -459,6 +458,161 @@ public class StatusListTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => verifier.VerifyAsync(
             new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context(), cancelled.Token));
+    }
+
+    // ---- -20 §8.3: no status list for a credential already found invalid ----
+
+    [Fact]
+    public async Task AValidCredential_FetchesItsStatusList()
+    {
+        // The control for the two below: without it, a status list never fetched at all would pass them.
+        using var builder = CredentialWithStatus(idx: 0);
+        var (verifier, http) = VerifierFor(builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0]));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => e.Code)));
+        Assert.Contains(StatusUri, http.Requested);
+    }
+
+    [Fact]
+    public async Task AnExpiredCredential_IsRefused_WithoutFetchingItsStatusList()
+    {
+        // SPEC: draft-ietf-oauth-status-list-20 §8.3, "further procedures regarding Status List MUST NOT be
+        // performed, e.g. fetching a Status List Token".
+        using var builder = CredentialWithStatus(idx: 0);
+        builder.Exp = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeSeconds();
+        var (verifier, http) = VerifierFor(builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0]));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.DoesNotContain(StatusUri, http.Requested);
+    }
+
+    [Fact]
+    public async Task APresentationForAnotherNonce_IsRefused_WithoutFetchingItsStatusList()
+    {
+        // A replayed presentation must not make us contact the Status Provider.
+        using var builder = CredentialWithStatus(idx: 0);
+        builder.KbNonce = "another-nonce";
+        var (verifier, http) = VerifierFor(builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0]));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.DoesNotContain(StatusUri, http.Requested);
+    }
+
+    // ---- -20 §5.1: the status list token's own claims ----
+
+    [Fact]
+    public async Task AStatusListWithoutIat_IsRefused()
+    {
+        using var builder = CredentialWithStatus(idx: 0);
+        var (verifier, _) = VerifierFor(
+            builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], includeIat: false));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        // The message says the claim is MISSING, which is what an operator tells the list's issuer.
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("lacks the required iat", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AStatusListNotValidYet_FailsClosed()
+    {
+        using var builder = CredentialWithStatus(idx: 0);
+        var (verifier, _) = VerifierFor(
+            builder,
+            builder.BuildStatusListToken(
+                StatusUri, bits: 1, statuses: [0], nbf: DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds()));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_unresolvable" && e.Message.Contains("not valid yet", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(-1)] // a minute ago: no reason to refuse, and inside the skew, so "now - skew < nbf" would wrongly refuse it
+    [InlineData(1)] // a minute ahead: inside the default five-minute skew, so "now < nbf" would wrongly refuse it
+    public async Task AStatusListWhoseNbfIsWithinTheClockSkew_Passes(int minutes)
+    {
+        using var builder = CredentialWithStatus(idx: 0);
+        var (verifier, _) = VerifierFor(
+            builder,
+            builder.BuildStatusListToken(
+                StatusUri, bits: 1, statuses: [0], nbf: DateTimeOffset.UtcNow.AddMinutes(minutes).ToUnixTimeSeconds()));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => e.Code)));
+    }
+
+    [Fact]
+    public async Task AStatusListWhoseIatIsAString_IsRefused()
+    {
+        // SPEC: draft-ietf-oauth-status-list-20 §5.1, iat is a NumericDate, a JSON number. The handler would read
+        // "1700000000" and 1700000000 alike, so the type is checked on the JSON itself.
+        using var builder = CredentialWithStatus(idx: 0);
+        var (verifier, _) = VerifierFor(
+            builder,
+            builder.BuildStatusListToken(
+                StatusUri, bits: 1, statuses: [0], iat: DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("iat", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("exp")]
+    [InlineData("nbf")]
+    public async Task AStatusListWhoseExpOrNbfIsAString_IsRefused(string claim)
+    {
+        // A NumericDate is a JSON number (RFC 7519 section 2). The handler would read "4102444800" as a date.
+        using var builder = CredentialWithStatus(idx: 0);
+        var asText = DateTimeOffset.UtcNow.AddHours(claim == "exp" ? 1 : -1).ToUnixTimeSeconds()
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var token = claim == "exp"
+            ? builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], exp: asText)
+            : builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], nbf: asText);
+        var (verifier, _) = VerifierFor(builder, token);
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("not a number", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnUntrustedCredential_IsRefused_WithoutFetchingItsStatusList()
+    {
+        // On the x5c route trust is asked after the other checks, so this is the case the gate's trust half
+        // decides: everything else passes, and only the issuer is untrusted.
+        using var builder = CredentialWithStatus(idx: 0);
+        builder.UseCertificate();
+        var (verifier, http) = VerifierFor(
+            builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0]),
+            trust: new FakeTrustListResolver(trusted: false));
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "issuer_untrusted");
+        Assert.DoesNotContain(StatusUri, http.Requested);
     }
 
     /// <summary>Cancels the caller's token when <paramref name="url"/> is requested, and reports it.</summary>
