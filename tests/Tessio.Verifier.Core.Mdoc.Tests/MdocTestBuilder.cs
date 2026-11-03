@@ -130,6 +130,18 @@ internal sealed class MdocTestBuilder : IDisposable
     /// <summary>Signs the deviceSignature with its payload embedded, which no valid mdoc does.</summary>
     public bool DeviceSignatureEmbedded { get; set; }
 
+    /// <summary>Marks these labels critical in issuerAuth's protected header, writing each one there.</summary>
+    public int[]? IssuerAuthCritical { get; set; }
+
+    /// <summary>Marks these labels critical in the deviceSignature's protected header, as for issuerAuth.</summary>
+    public int[]? DeviceSignatureCritical { get; set; }
+
+    /// <summary>Writes these bytes as issuerAuth instead of the signed one, for decoder-level refusals.</summary>
+    public byte[]? IssuerAuthBytes { get; set; }
+
+    /// <summary>Writes these bytes as the deviceSignature instead of the signed one, for decoder-level refusals.</summary>
+    public byte[]? DeviceSignatureBytes { get; set; }
+
     /// <summary>Writes issuerAuth's protected alg as this text instead of an integer.</summary>
     public string? IssuerAuthTextAlg { get; set; }
 
@@ -152,7 +164,7 @@ internal sealed class MdocTestBuilder : IDisposable
             encodedItems.Add(TamperItem is null ? item : TamperItem(item, name));
         }
 
-        var issuerAuth = SignMso(digests);
+        var issuerAuth = IssuerAuthBytes ?? SignMso(digests);
 
         var w = new CborWriter(CborConformanceMode.Lax);
         w.WriteStartMap(3);
@@ -206,6 +218,7 @@ internal sealed class MdocTestBuilder : IDisposable
         var transcript = SessionTranscriptBuilder.Build(ClientId, Nonce, EncryptionKeyThumbprint, ResponseUri);
         var deviceAuthBytes = SessionTranscriptBuilder.BuildDeviceAuthenticationBytes(transcript, DocType, encodedNameSpaces);
         var deviceSigner = new CoseSigner(DeviceSignerOverride ?? _deviceKey, HashAlgorithmName.SHA256);
+        MarkCritical(deviceSigner, DeviceSignatureCritical);
         var signature = DeviceSignatureEmbedded
             ? CoseSign1Message.SignEmbedded(deviceAuthBytes, deviceSigner)
             : CoseSign1Message.SignDetached(deviceAuthBytes, deviceSigner);
@@ -214,6 +227,7 @@ internal sealed class MdocTestBuilder : IDisposable
             signature = Esp256.Resign(signature, DeviceSignerOverride ?? _deviceKey, deviceAuthBytes);
         }
 
+        signature = DeviceSignatureBytes ?? signature;
         w.WriteTextString("deviceSigned");
         w.WriteStartMap(2);
         w.WriteTextString("nameSpaces");
@@ -315,6 +329,7 @@ internal sealed class MdocTestBuilder : IDisposable
         var signer = new CoseSigner(SignerKeyOverride ?? _dsKey, HashAlgorithmName.SHA256);
         // SPEC: RFC 9360 — x5chain at header label 33; DS certificate first, then the chain.
         signer.UnprotectedHeaders.Add(new CoseHeaderLabel(33), CoseHeaderValue.FromEncodedValue(EncodeChain()));
+        MarkCritical(signer, IssuerAuthCritical);
         var issuerAuth = IssuerAuthDetached
             ? CoseSign1Message.SignDetached(payload.Encode(), signer)
             : CoseSign1Message.SignEmbedded(payload.Encode(), signer);
@@ -324,6 +339,31 @@ internal sealed class MdocTestBuilder : IDisposable
         }
 
         return IssuerAuthEsp256 ? Esp256.Resign(issuerAuth, SignerKeyOverride ?? _dsKey) : issuerAuth;
+    }
+
+    private static void MarkCritical(CoseSigner signer, int[]? labels)
+    {
+        if (labels is null)
+        {
+            return;
+        }
+
+        var critical = new CborWriter();
+        critical.WriteStartArray(labels.Length);
+        foreach (var label in labels)
+        {
+            critical.WriteInt32(label);
+        }
+
+        critical.WriteEndArray();
+        signer.ProtectedHeaders.Add(CoseHeaderLabel.CriticalHeaders, CoseHeaderValue.FromEncodedValue(critical.Encode()));
+
+        // The platform signs a crit only when every label it names is already in its protected map. It writes alg
+        // itself and refuses a second one, so alg cannot be named here; CoseSign1VerificationTests signs that by hand.
+        foreach (var label in labels)
+        {
+            signer.ProtectedHeaders.Add(new CoseHeaderLabel(label), CoseHeaderValue.FromInt32(0));
+        }
     }
 
     private byte[] EncodeChain()

@@ -38,15 +38,9 @@ internal static class DeviceResponseParser
     /// <summary>Extracts and parses the MSO from the issuerAuth payload (tag-24 wrapped).</summary>
     public static MobileSecurityObject ParseMso(byte[] issuerAuth)
     {
-        byte[]? payload;
-        try
-        {
-            payload = CoseMessage.DecodeSign1(issuerAuth).Content?.ToArray();
-        }
-        catch (Exception e) when (e is System.Security.Cryptography.CryptographicException or ArgumentException)
-        {
-            throw new MdocProcessingException(MdocErrorCodes.MsoInvalid, $"issuerAuth is not a valid COSE_Sign1: {e.Message}");
-        }
+        var message = CoseSign1Verification.Decode(issuerAuth, out var problem)
+            ?? throw new MdocProcessingException(MdocErrorCodes.MsoInvalid, $"issuerAuth is not a valid COSE_Sign1: {problem}");
+        var payload = message.Content?.ToArray();
 
         if (payload is null)
         {

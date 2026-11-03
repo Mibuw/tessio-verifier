@@ -74,6 +74,25 @@ internal static class Esp256
         return writer.Encode();
     }
 
+    /// <summary>
+    /// Signs an embedded COSE_Sign1 with these exact protected and unprotected header maps, for shapes the platform
+    /// refuses to sign, such as a crit naming a label that is not in the protected bucket. It signs with ECDSA and
+    /// SHA-256 under <paramref name="key"/>, so the alg the caller writes into the protected map must say so.
+    /// </summary>
+    public static byte[] SignWithHeaders(byte[] protectedMap, byte[] unprotectedMap, byte[] payload, ECDsa key)
+    {
+        var signature = key.SignData(SigStructure(protectedMap, payload), HashAlgorithmName.SHA256);
+        var writer = new CborWriter(CborConformanceMode.Lax);
+        writer.WriteTag((CborTag)18);
+        writer.WriteStartArray(4);
+        writer.WriteByteString(protectedMap);
+        writer.WriteEncodedValue(unprotectedMap);
+        writer.WriteByteString(payload);
+        writer.WriteByteString(signature);
+        writer.WriteEndArray();
+        return writer.Encode();
+    }
+
     // RFC 9052 section 4.4, for a COSE_Sign1: [ "Signature1", body_protected, external_aad, payload ].
     private static byte[] SigStructure(byte[] protectedBytes, byte[] content)
     {
