@@ -58,7 +58,6 @@ internal sealed record MsoRevocationListToken(
     private static readonly int[] UnderstoodLabels = [1, 16, 33];
 
     private const int CoseSign1Tag = 18;
-    private static readonly CoseHeaderLabel CriticalLabel = new(2);
     private static readonly CoseHeaderLabel TypeLabel = new(16);
     private static readonly CoseHeaderLabel X5ChainLabel = new(33);
 
@@ -92,7 +91,8 @@ internal sealed record MsoRevocationListToken(
             throw new InvalidListException("The MSO revocation list is not a tagged COSE_Sign1 (tag 18).");
         }
 
-        var message = CoseMessage.DecodeSign1(body);
+        var message = CoseSign1Verification.Decode(body, out var problem)
+            ?? throw new InvalidListException($"The MSO revocation list is not a well-formed COSE_Sign1 CWT: {problem}");
         var expectedType = TypeOf(kind);
 
         if (CoseSign1Verification.Algorithm(message) is not { } alg || !CurveOfAlgorithm.TryGetValue(alg, out var curve))
@@ -100,10 +100,8 @@ internal sealed record MsoRevocationListToken(
             throw new InvalidListException("The MSO revocation list's algorithm is not one of ES256, ES384, ES512 or ESP256.");
         }
 
-        // SPEC: RFC 9052 section 3.1, crit names the protected header parameters "an application that is processing
-        // a message is required to understand", and "The array MUST have at least one value in it". A list naming
-        // one this decoder does not process is refused, and the check is ours rather than left to the platform.
-        if (message.ProtectedHeaders.TryGetValue(CriticalLabel, out var critical) && !OnlyUnderstood(critical))
+        // A list naming a header this decoder does not process is refused (RFC 9052 section 3.1, quoted on the check).
+        if (!CoseSign1Verification.CriticalHeadersUnderstood(message, UnderstoodLabels))
         {
             throw new InvalidListException("The MSO revocation list marks a header critical that this verifier does not process.");
         }
@@ -143,7 +141,7 @@ internal sealed record MsoRevocationListToken(
             throw new InvalidListException("The MSO revocation list's signing key is not on the curve its algorithm names.");
         }
 
-        if (!CoseSign1Verification.VerifyEmbedded(message, key))
+        if (!CoseSign1Verification.VerifyEmbedded(message, key, UnderstoodLabels))
         {
             throw new InvalidListException("The MSO revocation list's signature does not verify.");
         }
@@ -157,25 +155,6 @@ internal sealed record MsoRevocationListToken(
             : kind == RevocationListKind.StatusList
               && reader.PeekState() == CborReaderState.UnsignedInteger
               && reader.ReadUInt64() == StatusListCoapContentFormat;
-    }
-
-    private static bool OnlyUnderstood(CoseHeaderValue critical)
-    {
-        // An empty array never arrives: the platform's decoder refuses one, as RFC 9052 section 3.1 requires.
-        var reader = new CborReader(critical.EncodedValue);
-        reader.ReadStartArray();
-        while (reader.PeekState() != CborReaderState.EndArray)
-        {
-            // A text label is never one this decoder processes.
-            if (reader.PeekState() is not (CborReaderState.UnsignedInteger or CborReaderState.NegativeInteger)
-                || !UnderstoodLabels.Contains(reader.ReadInt32()))
-            {
-                return false;
-            }
-        }
-
-        reader.ReadEndArray();
-        return true;
     }
 
     // SPEC: RFC 9360 section 2, x5chain is one bstr certificate or an array of them, end-entity first.

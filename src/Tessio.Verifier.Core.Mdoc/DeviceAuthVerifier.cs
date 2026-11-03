@@ -14,6 +14,9 @@ namespace Tessio.Verifier.Core.Mdoc;
 //   DeviceAuthenticationBytes = #6.24(bstr .cbor DeviceAuthentication)
 internal static class DeviceAuthVerifier
 {
+    // The protected header label this verifier processes, alg, the only one a crit header may name.
+    private static readonly int[] UnderstoodLabels = [1];
+
     public static List<VerificationError> Verify(
         ParsedDocument document, MobileSecurityObject mso, byte[] sessionTranscript)
     {
@@ -32,9 +35,13 @@ internal static class DeviceAuthVerifier
         var deviceAuthenticationBytes = SessionTranscriptBuilder.BuildDeviceAuthenticationBytes(
             sessionTranscript, document.DocType, deviceSigned.EncodedNameSpacesBytes);
 
+        if (CoseSign1Verification.Decode(deviceSigned.DeviceSignature, out var problem) is not { } message)
+        {
+            return [Error($"The deviceSignature is not a valid COSE_Sign1: {problem}")];
+        }
+
         try
         {
-            var message = CoseMessage.DecodeSign1(deviceSigned.DeviceSignature);
             // The signed bytes are DeviceAuthentication, which the verifier rebuilds from this request, so the
             // signature is checked detached. One carrying a payload of its own is not that signature.
             if (message.Content is not null)
@@ -42,8 +49,13 @@ internal static class DeviceAuthVerifier
                 return [Error("The deviceSignature carries its payload; it must be detached.")];
             }
 
+            if (!CoseSign1Verification.CriticalHeadersUnderstood(message, UnderstoodLabels))
+            {
+                return [Error("The deviceSignature marks a header critical that this verifier does not process.")];
+            }
+
             using var deviceKey = ECDsa.Create(CoseKey.ReadEc2PublicKey(mso.DeviceKeyEncoded));
-            if (!CoseSign1Verification.VerifyDetached(message, deviceKey, deviceAuthenticationBytes))
+            if (!CoseSign1Verification.VerifyDetached(message, deviceKey, deviceAuthenticationBytes, UnderstoodLabels))
             {
                 return [Error("The deviceSignature does not verify over this request's session transcript.")];
             }

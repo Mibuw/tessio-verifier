@@ -23,22 +23,24 @@ internal sealed record IssuerAuthResolution
 // SPEC: ISO/IEC 18013-5 §9.3.1 — issuer data authentication.
 internal static class IssuerAuthVerifier
 {
+    // The protected header labels this verifier processes, alg and x5chain, the only ones a crit header may name.
+    private static readonly int[] UnderstoodLabels = [1, 33];
+
     public static IssuerAuthResolution Verify(byte[] issuerAuth)
     {
-        CoseSign1Message message;
-        try
-        {
-            message = CoseMessage.DecodeSign1(issuerAuth);
-        }
-        catch (Exception e) when (e is CryptographicException or ArgumentException)
-        {
-            throw new MdocProcessingException(MdocErrorCodes.MsoInvalid, $"issuerAuth is not a valid COSE_Sign1: {e.Message}");
-        }
+        var message = CoseSign1Verification.Decode(issuerAuth, out var problem)
+            ?? throw new MdocProcessingException(MdocErrorCodes.MsoInvalid, $"issuerAuth is not a valid COSE_Sign1: {problem}");
 
         if (CoseSign1Verification.Algorithm(message) is not { } alg || !CoseAlgorithms.IssuerAuth.Contains(alg))
         {
             throw new MdocProcessingException(
                 MdocErrorCodes.AlgorithmNotAllowed, "The issuerAuth algorithm is not on the ES256/ES384/ES512/ESP256 allowlist.");
+        }
+
+        if (!CoseSign1Verification.CriticalHeadersUnderstood(message, UnderstoodLabels))
+        {
+            throw new MdocProcessingException(
+                MdocErrorCodes.MsoInvalid, "issuerAuth marks a header critical that this verifier does not process.");
         }
 
         // The MSO is the payload; DeviceResponseParser.ParseMso reads it, but only after this signature check.
@@ -61,7 +63,7 @@ internal static class IssuerAuthVerifier
 
             using (key)
             {
-                if (!CoseSign1Verification.VerifyEmbedded(message, key))
+                if (!CoseSign1Verification.VerifyEmbedded(message, key, UnderstoodLabels))
                 {
                     throw new MdocProcessingException(
                         MdocErrorCodes.SignatureInvalid, "The issuerAuth signature does not verify against the Document Signer key.");

@@ -125,6 +125,86 @@ public sealed class MdocVerifierTests : IDisposable
     }
 
     [Fact]
+    public async Task AnIssuerAuthMarkingAHeaderCriticalItDoesNotProcess_IsRefused()
+    {
+        // SPEC: RFC 9052 section 3.1, crit names the headers "an application that is processing a message is required
+        // to understand". The platform verifies such a signature regardless.
+        _builder.IssuerAuthCritical = [99];
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.MsoInvalid
+            && e.Message.Contains("critical", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task ADeviceSignatureMarkingAHeaderCriticalItDoesNotProcess_IsRefused()
+    {
+        _builder.DeviceSignatureCritical = [99];
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.DeviceAuthInvalid
+            && e.Message.Contains("critical", StringComparison.Ordinal));
+    }
+
+    // A tagged COSE_Sign1 whose protected header has a label past Int32, which makes the platform's decoder throw
+    // OverflowException. Nothing here is signed: the decoder refuses it first.
+    private static byte[] CoseSign1WithAHugeHeaderLabel(bool detached)
+    {
+        var protectedMap = new System.Formats.Cbor.CborWriter();
+        protectedMap.WriteStartMap(2);
+        protectedMap.WriteInt32(1);
+        protectedMap.WriteInt32(-7);
+        protectedMap.WriteUInt64(1UL << 32);
+        protectedMap.WriteInt32(0);
+        protectedMap.WriteEndMap();
+        var w = new System.Formats.Cbor.CborWriter();
+        w.WriteTag((System.Formats.Cbor.CborTag)18);
+        w.WriteStartArray(4);
+        w.WriteByteString(protectedMap.Encode());
+        w.WriteStartMap(0);
+        w.WriteEndMap();
+        if (detached)
+        {
+            w.WriteNull();
+        }
+        else
+        {
+            w.WriteByteString([1]);
+        }
+
+        w.WriteByteString(new byte[64]);
+        w.WriteEndArray();
+        return w.Encode();
+    }
+
+    [Fact]
+    public async Task AnIssuerAuthTheDecoderCannotRead_IsRefused_NotThrown()
+    {
+        // Verification returns a result for bad input; an OverflowException used to escape VerifyAsync here.
+        _builder.IssuerAuthBytes = CoseSign1WithAHugeHeaderLabel(detached: false);
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.MsoInvalid);
+    }
+
+    [Fact]
+    public async Task ADeviceSignatureTheDecoderCannotRead_IsRefused_NotThrown()
+    {
+        _builder.DeviceSignatureBytes = CoseSign1WithAHugeHeaderLabel(detached: true);
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == MdocErrorCodes.DeviceAuthInvalid);
+    }
+
+    [Fact]
     public async Task AnIssuerAuthWithATextAlg_IsRefused_NotThrown()
     {
         // Reading a text alg as an integer throws InvalidOperationException, which used to escape VerifyAsync.
