@@ -425,16 +425,13 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
             return null;
         }
 
-        if (node?.GetValueKind() != JsonValueKind.Number)
+        if (!UnixTime.TryFromNumericDate(node, out var date))
         {
             errors.Add(new VerificationError { Code = ErrorCodes.StructureInvalid, Message = $"The {claim} claim is not a NumericDate." });
             return null;
         }
 
-        var element = node.GetValue<JsonElement>();
-        return element.TryGetInt64(out var seconds)
-            ? UnixTime.FromSeconds(seconds)
-            : UnixTime.FromSeconds(element.GetDouble());
+        return date;
     }
 
     private static IssuerInfo IssuerInfoFrom(IssuerKeyResolution resolution, IssuerTrustStatus trust) => new()

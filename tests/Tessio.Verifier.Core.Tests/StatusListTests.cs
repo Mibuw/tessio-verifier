@@ -596,6 +596,30 @@ public class StatusListTests
         Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("not a number", StringComparison.Ordinal));
     }
 
+    public static TheoryData<string> MisshapenStatusLists => ["bits as a string", "status_list as a string"];
+
+    [Theory]
+    [MemberData(nameof(MisshapenStatusLists))]
+    public async Task AStatusListClaimOfTheWrongShape_IsAStatusFailure_NotAStructureOne(string shape)
+    {
+        // JsonElement throws when asked for a number of a string or a property of a non-object. Thrown, it reached
+        // the verifier's outer net and read as structure_invalid for the credential, which says nothing of status.
+        using var builder = CredentialWithStatus(idx: 0);
+        var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], statusList: lst => shape switch
+        {
+            "bits as a string" => new Dictionary<string, object> { ["bits"] = "1", ["lst"] = lst },
+            _ => "1",
+        });
+        var (verifier, _) = VerifierFor(builder, token);
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("status_list", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Errors, e => e.Code == ErrorCodes.StructureInvalid);
+    }
+
     [Fact]
     public async Task AnUntrustedCredential_IsRefused_WithoutFetchingItsStatusList()
     {

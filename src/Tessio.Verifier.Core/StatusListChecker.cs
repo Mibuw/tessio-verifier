@@ -282,7 +282,11 @@ internal sealed class StatusListChecker
         // read, which the handler's claims would do.
         var hasExp = claims.TryGetProperty("exp", out var exp);
         var hasNbf = claims.TryGetProperty("nbf", out var nbf);
-        if (!IsNumericDate(iat) || (hasExp && !IsNumericDate(exp)) || (hasNbf && !IsNumericDate(nbf)))
+        var expiry = default(DateTimeOffset);
+        var notBefore = default(DateTimeOffset);
+        if (!UnixTime.TryFromNumericDate(iat, out _)
+            || (hasExp && !UnixTime.TryFromNumericDate(exp, out expiry))
+            || (hasNbf && !UnixTime.TryFromNumericDate(nbf, out notBefore)))
         {
             return [Error(ErrorCodes.StatusInvalid, "The status list token carries an iat, exp or nbf that is not a number.")];
         }
@@ -302,8 +306,8 @@ internal sealed class StatusListChecker
 
         // SPEC: §8.3 — when exp is present, an expired status list token MUST be rejected.
         var now = _clock.GetUtcNow();
-        DateTimeOffset? expiresAt = hasExp ? NumericDate(exp) : null;
-        if (expiresAt is { } expiry && now - _clockSkew >= expiry)
+        DateTimeOffset? expiresAt = hasExp ? expiry : null;
+        if (hasExp && now - _clockSkew >= expiry)
         {
             return [Error(ErrorCodes.StatusUnresolvable, "The status list token is expired; current status is unknown.")];
         }
@@ -311,15 +315,19 @@ internal sealed class StatusListChecker
         // SPEC: §5.1 — "Relying Parties MUST reject JWTs that are not valid in all other respects per "JSON Web
         // Token (JWT)" [RFC7519]", and RFC 7519 section 4.1.5 does not accept a token before its nbf. Lifetime
         // validation is off above, so it is checked here, answered as the mdoc path answers a list not valid yet.
-        if (hasNbf && now + _clockSkew < NumericDate(nbf))
+        if (hasNbf && now + _clockSkew < notBefore)
         {
             return [Error(ErrorCodes.StatusUnresolvable, "The status list token is not valid yet; current status is unknown.")];
         }
 
-        // SPEC: §4.2 — status_list: { "bits": 1|2|4|8, "lst": base64url(zlib-deflate(bytes)) }.
+        // SPEC: §4.2 — status_list: { "bits": 1|2|4|8, "lst": base64url(zlib-deflate(bytes)) }. The kinds are
+        // checked first because JsonElement throws when asked for a property of a non-object or a number of a
+        // non-number, and that throw would answer structure_invalid for the whole credential.
         if (!claims.TryGetProperty("status_list", out var statusListProp)
+            || statusListProp.ValueKind != JsonValueKind.Object
             || !statusListProp.TryGetProperty("bits", out var bitsProp)
             || !statusListProp.TryGetProperty("lst", out var lstProp)
+            || bitsProp.ValueKind != JsonValueKind.Number
             || !bitsProp.TryGetInt32(out var bits)
             || !StatusListValues.IsAllowedBits(bits)
             || lstProp.ValueKind != JsonValueKind.String)
@@ -359,16 +367,6 @@ internal sealed class StatusListChecker
         var until = StatusListValues.CacheUntil(now, _cacheDuration, ttlSeconds, expiresAt);
         _cache.Set(uri, new CachedList(bits, list), until, now);
     }
-
-    private static bool IsNumericDate(JsonElement value) => value.ValueKind == JsonValueKind.Number;
-
-    // SPEC: RFC 7519 section 2, a NumericDate may carry a fraction; whole seconds are enough here. A number past
-    // what a double holds takes the end its sign points to, read from the text, so a far nbf is still refused
-    // and no value throws (UnixTime saturates).
-    private static DateTimeOffset NumericDate(JsonElement value) =>
-        UnixTime.FromSeconds(
-            value.TryGetDouble(out var seconds) ? Math.Floor(seconds)
-            : value.GetRawText().StartsWith('-') ? double.NegativeInfinity : double.PositiveInfinity);
 
     /// <summary>
     /// The whole seconds of a ttl that is a positive JSON number. The sign and zero are read from the number's

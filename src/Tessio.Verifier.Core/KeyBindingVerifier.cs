@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -58,6 +60,19 @@ internal static class KeyBindingVerifier
             return errors;
         }
 
+        // Read as the issuer-signed payload is, so a repeated member has no meaning to pick, and so a claim's
+        // JSON type can be checked: the handler's claims give a string "1700000000" and the number alike.
+        JsonObject payload;
+        try
+        {
+            payload = (JsonObject)StrictJson.Parse(Base64UrlEncoder.DecodeBytes(token.EncodedPayload))!;
+        }
+        catch (JsonException)
+        {
+            errors.Add(Error(ErrorCodes.KeyBindingInvalid, $"The KB-JWT payload is not JSON with {StrictJson.Accepts}."));
+            return errors;
+        }
+
         // SPEC: RFC 9901 §4.3 — aud, nonce, and iat are REQUIRED; nonce/aud bind the presentation
         // to this verifier's challenge (replay protection).
         if (!token.Audiences.Contains(context.Audience, StringComparer.Ordinal))
@@ -76,13 +91,12 @@ internal static class KeyBindingVerifier
         // past is stale or replayed, and one far in the future is a wrong or spoofed clock. Checking
         // only its presence, as this once did, accepts both. The conformance suite skews iat by a year
         // each way and expects rejection.
-        if (!token.TryGetClaim("iat", out var iatClaim))
+        if (!payload.TryGetPropertyValue("iat", out var iatNode))
         {
             errors.Add(Error(ErrorCodes.KeyBindingInvalid, "The KB-JWT is missing the required iat claim."));
         }
-        else if (long.TryParse(iatClaim.Value, out var iatSeconds))
+        else if (UnixTime.TryFromNumericDate(iatNode, out var iat))
         {
-            var iat = UnixTime.FromSeconds(iatSeconds);
             var oldest = maxAge == Timeout.InfiniteTimeSpan ? DateTimeOffset.MinValue : now - maxAge - clockSkew;
             if (iat < oldest)
             {

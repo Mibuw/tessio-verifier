@@ -273,10 +273,13 @@ internal sealed class TestCredentialBuilder : IDisposable
     /// seam judges by identifier rather than by anchoring. The real tokens this code meets carry x5c,
     /// so a suite with no x5c status token says nothing about the anchoring path. Added 2026-09-20
     /// after review found that gap.
+    /// <c>statusList</c> replaces the <c>status_list</c> claim, given the encoded <c>lst</c>, for a claim of
+    /// the wrong JSON shape.
     /// </remarks>
     public string BuildStatusListToken(
         string uri, int bits, byte[] statuses, object? exp = null, string typ = "statuslist+jwt", string? sub = null,
-        object? ttl = null, X509Certificate2? signWith = null, bool includeIat = true, object? nbf = null, object? iat = null)
+        object? ttl = null, X509Certificate2? signWith = null, bool includeIat = true, object? nbf = null, object? iat = null,
+        Func<string, object>? statusList = null)
     {
         var packed = new byte[(statuses.Length * bits + 7) / 8];
         for (var i = 0; i < statuses.Length; i++)
@@ -299,7 +302,7 @@ internal sealed class TestCredentialBuilder : IDisposable
         {
             ["iss"] = Issuer,
             ["sub"] = sub ?? uri,
-            ["status_list"] = new Dictionary<string, object>
+            ["status_list"] = statusList?.Invoke(Base64UrlEncoder.Encode(compressed)) ?? new Dictionary<string, object>
             {
                 ["bits"] = bits,
                 ["lst"] = Base64UrlEncoder.Encode(compressed),

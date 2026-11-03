@@ -93,14 +93,33 @@ public class SdJwtHostileJsonTests
         Assert.Equal(valid, result.IsValid);
     }
 
+    [Fact]
+    public async Task VerifyAsync_FractionalTimeClaim_ReadsAsTheWholeSecondAtOrBeforeIt()
+    {
+        // Floor, not truncation: -0.5 is half a second before the epoch, so the whole second at or before it is
+        // 23:59:59 on the last day of 1969. Truncating toward zero would read it as the epoch itself.
+        var builder = new TestCredentialBuilder
+        {
+            Exp = null,
+            RewritePayloadJson = json => PrependMember(json, "exp", "-0.5"),
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.CredentialExpired
+                                            && e.Message.Contains("1969-12-31T23:59:59", StringComparison.Ordinal));
+    }
+
     // SPEC: RFC 7519 §4.1.4 and §4.1.5, "Its value MUST be a number containing a NumericDate value."
     // A string used to be skipped, so "exp":"0" never expired.
+    // A string reaches this library's own check, so its message is pinned: a read that threw would reach the outer
+    // net as structure_invalid too. The JWT parser refuses null and true itself, before that check runs.
     [Theory]
-    [InlineData("exp", "\"0\"")]
-    [InlineData("nbf", "\"4102444800\"")]
-    [InlineData("exp", "null")]
-    [InlineData("exp", "true")]
-    public async Task VerifyAsync_TimeClaimThatIsNotANumber_IsRefused(string claim, string value)
+    [InlineData("exp", "\"0\"", "is not a NumericDate")]
+    [InlineData("nbf", "\"4102444800\"", "is not a NumericDate")]
+    [InlineData("exp", "null", "malformed")]
+    [InlineData("exp", "true", "malformed")]
+    public async Task VerifyAsync_TimeClaimThatIsNotANumber_IsRefused(string claim, string value, string message)
     {
         var builder = new TestCredentialBuilder
         {
@@ -110,7 +129,8 @@ public class SdJwtHostileJsonTests
 
         var result = await VerifyAsync(builder);
 
-        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.StructureInvalid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.StructureInvalid
+                                            && e.Message.Contains(message, StringComparison.Ordinal));
     }
 
     [Theory]
@@ -126,6 +146,57 @@ public class SdJwtHostileJsonTests
         var result = await VerifyAsync(builder);
 
         Assert.Contains(result.Errors, e => e.Code == ErrorCodes.KeyBindingInvalid);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_KeyBindingIatAsAString_IsRefused()
+    {
+        // SPEC: RFC 7519 §4.1.6, iat "MUST be a number". The value is now, so only its type is wrong: the
+        // handler's claim reads "1700000000" and 1700000000 alike, which is how a string iat used to pass.
+        var builder = new TestCredentialBuilder
+        {
+            RewriteKbPayloadJson = json => Regex.Replace(json, "\"iat\":(\\d+)", "\"iat\":\"$1\""),
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.KeyBindingInvalid
+                                            && e.Message.Contains("not a numeric timestamp", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("$1.5")]
+    [InlineData("$1e0")]
+    public async Task VerifyAsync_KeyBindingIatAsAFractionOrExponent_IsAccepted(string replacement)
+    {
+        // SPEC: RFC 7519 §2, a NumericDate is a number, "other than that non-integer values can be represented".
+        // Refusing the string form must not refuse these, which are numbers.
+        var builder = new TestCredentialBuilder
+        {
+            RewriteKbPayloadJson = json => Regex.Replace(json, "\"iat\":(\\d+)", $"\"iat\":{replacement}"),
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => e.Message)));
+    }
+
+    [Fact]
+    public async Task VerifyAsync_KeyBindingPayloadRepeatingAMember_IsRefused()
+    {
+        // RFC 8259 §4: parsers disagree on a repeated name, so a stale iat beside a fresh one has no single
+        // meaning. The KB-JWT is read as the issuer-signed payload is, and refused.
+        var builder = new TestCredentialBuilder
+        {
+            RewriteKbPayloadJson = json => json.Replace("{", "{\"iat\":0,", StringComparison.Ordinal),
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.KeyBindingInvalid
+                                            && e.Message.Contains("payload is not JSON", StringComparison.Ordinal));
     }
 
     [Fact]
