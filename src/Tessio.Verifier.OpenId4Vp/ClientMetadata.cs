@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Tessio.Verifier.Core;
 
 namespace Tessio.Verifier.OpenId4Vp;
 
@@ -17,10 +18,10 @@ namespace Tessio.Verifier.OpenId4Vp;
 // constrains the encryption values further.
 public static class ClientMetadata
 {
-    // SPEC: RFC 7518 — ES256 is the signature algorithm EUDI issuers and wallets use; -7 is its COSE
-    // identifier (RFC 9053 §2.1), which is how mdoc names algorithms.
+    // SPEC: RFC 7518. ES256 is the signature algorithm EUDI issuers and wallets use. For mdoc, which names
+    // algorithms by COSE identifier, the advertised list is CoseAlgorithms.Advertised, owned beside the
+    // verifiers that must accept every value on it.
     private const string Es256 = "ES256";
-    private const int CoseEs256 = -7;
 
     /// <summary>
     /// Builds <c>client_metadata</c> for a request in the given credential format.
@@ -116,8 +117,8 @@ public static class ClientMetadata
             {
                 ["mso_mdoc"] = new JsonObject
                 {
-                    ["issuerauth_alg_values"] = new JsonArray(CoseEs256),
-                    ["deviceauth_alg_values"] = new JsonArray(CoseEs256),
+                    ["issuerauth_alg_values"] = AlgValues(CoseAlgorithms.Advertised),
+                    ["deviceauth_alg_values"] = AlgValues(CoseAlgorithms.Advertised),
                 },
             }
             : new JsonObject
@@ -128,4 +129,7 @@ public static class ClientMetadata
                     ["kb-jwt_alg_values"] = new JsonArray(Es256),
                 },
             };
+
+    private static JsonArray AlgValues(IReadOnlyList<int> algorithms) =>
+        new([.. algorithms.Select(static alg => (JsonNode)alg)]);
 }

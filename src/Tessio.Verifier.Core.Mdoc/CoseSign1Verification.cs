@@ -19,9 +19,6 @@ namespace Tessio.Verifier.Core.Mdoc;
 /// </remarks>
 internal static class CoseSign1Verification
 {
-    /// <summary>ESP256, RFC 9864 section 2: ECDSA on P-256 with SHA-256, the curve fixed by the identifier.</summary>
-    internal const int Esp256 = -9;
-
     private const string P256Oid = "1.2.840.10045.3.1.7";
 
     /// <summary>The message's protected alg, or null when it carries none as an integer.</summary>
@@ -36,7 +33,7 @@ internal static class CoseSign1Verification
     /// </summary>
     internal static bool VerifyEmbedded(CoseSign1Message message, AsymmetricAlgorithm key) =>
         message.Content is { } content
-        && (Algorithm(message) == Esp256 ? VerifyEsp256(message, key, content.Span) : message.VerifyEmbedded(key));
+        && (Algorithm(message) == CoseAlgorithms.Esp256 ? VerifyEsp256(message, key, content.Span) : message.VerifyEmbedded(key));
 
     /// <summary>
     /// Verifies a signature over <paramref name="content"/>, which the message must not carry itself. False for
@@ -44,7 +41,7 @@ internal static class CoseSign1Verification
     /// </summary>
     internal static bool VerifyDetached(CoseSign1Message message, AsymmetricAlgorithm key, byte[] content) =>
         message.Content is null
-        && (Algorithm(message) == Esp256 ? VerifyEsp256(message, key, content) : message.VerifyDetached(key, content));
+        && (Algorithm(message) == CoseAlgorithms.Esp256 ? VerifyEsp256(message, key, content) : message.VerifyDetached(key, content));
 
     // SPEC: RFC 9052 section 4.4, Sig_structure = [ context : "Signature1", body_protected, external_aad : bstr,
     // payload : bstr ] for a COSE_Sign1, with no sign_protected and an empty external_aad here. RFC 9053 section

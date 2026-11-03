@@ -43,10 +43,10 @@ internal sealed record MsoRevocationListToken(
     // has a verifier validate status information with -7 or -9.
     private static readonly Dictionary<int, string> CurveOfAlgorithm = new()
     {
-        [-7] = "1.2.840.10045.3.1.7", // ES256, NIST P-256
-        [CoseSign1Verification.Esp256] = "1.2.840.10045.3.1.7", // ESP256, NIST P-256
-        [-35] = "1.3.132.0.34", // ES384, NIST P-384
-        [-36] = "1.3.132.0.35", // ES512, NIST P-521
+        [CoseAlgorithms.Es256] = "1.2.840.10045.3.1.7", // NIST P-256
+        [CoseAlgorithms.Esp256] = "1.2.840.10045.3.1.7", // NIST P-256
+        [CoseAlgorithms.Es384] = "1.3.132.0.34", // NIST P-384
+        [CoseAlgorithms.Es512] = "1.3.132.0.35", // NIST P-521
     };
 
     // SPEC: draft-ietf-oauth-status-list-20 section 5.2, the type is the media type "or the registered CoAP
