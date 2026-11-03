@@ -34,9 +34,9 @@ public class CoseSign1VerificationTests
     public void AnEsp256Signature_Verifies()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var message = CoseMessage.DecodeSign1(SignedUnder(CoseSign1Verification.Esp256, key));
+        var message = CoseMessage.DecodeSign1(SignedUnder(CoseAlgorithms.Esp256, key));
 
-        Assert.Equal(CoseSign1Verification.Esp256, CoseSign1Verification.Algorithm(message));
+        Assert.Equal(CoseAlgorithms.Esp256, CoseSign1Verification.Algorithm(message));
         Assert.True(CoseSign1Verification.VerifyEmbedded(message, key));
     }
 
@@ -44,7 +44,7 @@ public class CoseSign1VerificationTests
     public void ADetachedEsp256Signature_Verifies_OnlyOverItsContent()
     {
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var message = CoseMessage.DecodeSign1(SignedUnder(CoseSign1Verification.Esp256, key, detached: true));
+        var message = CoseMessage.DecodeSign1(SignedUnder(CoseAlgorithms.Esp256, key, detached: true));
 
         Assert.True(CoseSign1Verification.VerifyDetached(message, key, Payload));
         Assert.False(CoseSign1Verification.VerifyDetached(message, key, [9, 9, 9]));
@@ -55,7 +55,7 @@ public class CoseSign1VerificationTests
     {
         using var signer = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-        var message = CoseMessage.DecodeSign1(SignedUnder(CoseSign1Verification.Esp256, signer));
+        var message = CoseMessage.DecodeSign1(SignedUnder(CoseAlgorithms.Esp256, signer));
 
         Assert.False(CoseSign1Verification.VerifyEmbedded(message, other));
     }
@@ -65,7 +65,7 @@ public class CoseSign1VerificationTests
     {
         // ESP256 names its curve. A P-384 key signing over SHA-256 is not the algorithm the header declares.
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP384);
-        var message = CoseMessage.DecodeSign1(SignedUnder(CoseSign1Verification.Esp256, key));
+        var message = CoseMessage.DecodeSign1(SignedUnder(CoseAlgorithms.Esp256, key));
 
         Assert.False(CoseSign1Verification.VerifyEmbedded(message, key));
     }

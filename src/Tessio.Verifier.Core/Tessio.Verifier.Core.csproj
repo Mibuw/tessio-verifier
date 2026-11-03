@@ -17,6 +17,9 @@
     <!-- For TrustSeam, so both credential verifiers turn a failing trust source into the same result,
          and ReaderCertificatePath, the signing-chain rules MdocReaderKey shares with the JAR builder. -->
     <InternalsVisibleTo Include="Tessio.Verifier.Core.Mdoc" />
+    <!-- For CoseAlgorithms, so the mdoc and request tests name the identifiers the code uses. -->
+    <InternalsVisibleTo Include="Tessio.Verifier.Core.Mdoc.Tests" />
+    <InternalsVisibleTo Include="Tessio.Verifier.OpenId4Vp.Tests" />
   </ItemGroup>
 
   <PropertyGroup>

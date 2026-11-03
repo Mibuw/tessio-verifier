@@ -62,6 +62,29 @@ public sealed class MdocVerifierTests : IDisposable
         Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Code}: {e.Message}")));
     }
 
+    public static TheoryData<int> AdvertisedAlgorithms() => [.. CoseAlgorithms.Advertised];
+
+    [Theory]
+    [MemberData(nameof(AdvertisedAlgorithms))]
+    public async Task EveryAlgorithmARequestAdvertises_Verifies(int alg)
+    {
+        // A request tells the wallet these are accepted (issuerauth_alg_values, deviceauth_alg_values), so each
+        // must verify under both. A value added to the list without a signer here fails, rather than passing
+        // untested.
+        var esp256 = alg switch
+        {
+            CoseAlgorithms.Es256 => false,
+            CoseAlgorithms.Esp256 => true,
+            _ => throw new InvalidOperationException($"No test signer for COSE algorithm {alg}; add one before advertising it."),
+        };
+        _builder.IssuerAuthEsp256 = esp256;
+        _builder.DeviceSignatureEsp256 = esp256;
+
+        var result = await VerifierFor(_builder).VerifyAsync(Credential(_builder), Context());
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Code}: {e.Message}")));
+    }
+
     [Fact]
     public async Task AnIssuerAuthUnderEsp256_ByAnotherKey_IsRefused()
     {
