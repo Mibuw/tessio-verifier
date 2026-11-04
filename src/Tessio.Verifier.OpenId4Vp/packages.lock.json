@@ -56,7 +56,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.IdentityModel.JsonWebTokens": "[8.23.0, )",
-          "Tessio.Verifier.Trust": "[0.20.5, )"
+          "Tessio.Verifier.Trust": "[0.28.4, )"
         }
       },
       "tessio.verifier.trust": {
@@ -126,7 +126,7 @@
         "type": "Project",
         "dependencies": {
           "Microsoft.IdentityModel.JsonWebTokens": "[8.23.0, )",
-          "Tessio.Verifier.Trust": "[0.20.5, )"
+          "Tessio.Verifier.Trust": "[0.28.4, )"
         }
       },
       "tessio.verifier.trust": {
