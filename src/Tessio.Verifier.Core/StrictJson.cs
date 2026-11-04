@@ -1,19 +1,27 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace Tessio.Verifier.Core;
 
 /// <summary>
-/// Parses JSON that arrives inside a signed credential, refusing what <see cref="JsonNode"/> would
-/// accept and then fail on later: see <see cref="Accepts"/>. RFC 8259 §4 says names SHOULD be unique
-/// and that parsers disagree on a repeat, so a repeat has no single meaning to hand on. A number the
-/// parser reads as infinity would later fail the host that writes it out. Throws
+/// Parses JSON that arrives from outside, in a credential, a wallet response or fetched metadata, refusing
+/// what <see cref="JsonNode"/> would accept and then fail on later: see <see cref="Accepts"/>. RFC 8259 §4
+/// says names SHOULD be unique and that parsers disagree on a repeat, so a repeat has no single meaning to
+/// hand on. A number the parser reads as infinity would later fail the host that writes it out. Throws
 /// <see cref="JsonException"/>, which each caller maps to its own error code.
 /// </summary>
+/// <remarks>
+/// The one owner of these rules in the library, OpenId4Vp included: a second statement of them would be free to
+/// drift from this one.
+/// </remarks>
 internal static class StrictJson
 {
     /// <summary>What this parser requires beyond JSON syntax, named in the callers' error messages.</summary>
     public const string Accepts = "text that is valid Unicode, no repeated name and no number outside the range of a double";
+
+    // Throws for a string that is not valid UTF-16, where Encoding.UTF8 would replace the bad code unit silently.
+    private static readonly UTF8Encoding Utf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
     public static JsonNode? Parse(byte[] utf8)
     {
@@ -28,7 +36,28 @@ internal static class StrictJson
         return JsonDocument.Parse(utf8);
     }
 
-    private static void Check(byte[] utf8)
+    /// <summary>The same rules, for JSON that arrives as a string, such as a form field a host has read.</summary>
+    public static JsonDocument ParseDocument(string json)
+    {
+        byte[] utf8;
+        try
+        {
+            utf8 = Utf8.GetBytes(json);
+        }
+        catch (EncoderFallbackException e)
+        {
+            throw new JsonException("A string is not valid Unicode text.", e);
+        }
+
+        return ParseDocument(utf8);
+    }
+
+    /// <summary>
+    /// The rules alone, for a caller that reads the bytes its own way. Throws <see cref="JsonException"/>. A
+    /// refusal under these rules names the rule and never the sender's text; text that is not JSON at all is the
+    /// reader's own refusal, whose message can quote it, so a caller that passes messages on refuses that first.
+    /// </summary>
+    public static void Check(byte[] utf8)
     {
         var reader = new Utf8JsonReader(utf8);
         var names = new Stack<HashSet<string>>();

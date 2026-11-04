@@ -254,26 +254,16 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
     {
         // A decrypted payload is untrusted input (see NormalizeDecryptedPayload), and so is a cleartext one,
         // so a payload that only looks like JSON is a malformed response, answered like every other, not an
-        // exception that escapes the parser.
-        JsonDocument parsed;
-        try
-        {
-            parsed = JsonDocument.Parse(payloadJson);
-        }
-        catch (JsonException e)
-        {
-            throw new WalletResponseException($"The {source} is not well formed JSON.", e);
-        }
-
-        using var document = parsed;
+        // exception that escapes the parser. StrictJson holds it to the credential's rules: a parameter named
+        // twice, such as a second vp_token or response beside the one verified, has no single meaning, and a
+        // name or string that is not valid text would fail whichever later read unescapes it.
+        using var document = ParseResponseJson(payloadJson, source);
         // The response parameters are members of an object, and the reads below need one.
         if (document.RootElement.ValueKind != JsonValueKind.Object)
         {
             throw new WalletResponseException($"The {source} is not a JSON object.");
         }
 
-        RequireReadableText(document.RootElement);
-        RequireUniqueMembers(document.RootElement, source);
         var state = document.RootElement.TryGetProperty("state", out var stateProp)
                     && stateProp.ValueKind == JsonValueKind.String
             ? stateProp.GetString()
@@ -305,19 +295,18 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
         JsonElement root;
         try
         {
-            using var document = JsonDocument.Parse(vpTokenJson);
-            RequireReadableText(document.RootElement);
+            using var document = StrictJson.ParseDocument(vpTokenJson);
             root = document.RootElement.Clone();
         }
-        catch (JsonException)
+        catch (JsonException) when (IsNotJson(vpTokenJson))
         {
             // A bare compact serialization (not JSON) is a single presentation string.
             return [MakeCredential(vpTokenJson)];
         }
-        catch (ArgumentException e)
+        catch (JsonException e)
         {
-            // A string that is not valid UTF-16, which a host's own form reading can hand over.
-            throw new WalletResponseException("The vp_token in the wallet response is not valid text.", e);
+            // JSON that breaks StrictJson's rules is not a presentation string either, so it is not read as one.
+            throw new WalletResponseException($"The vp_token in the wallet response is not JSON with {StrictJson.Accepts}.", e);
         }
 
         // SPEC: OpenID4VP 1.0 §8.1 — vp_token is a JSON object mapping each DCQL Credential Query id
@@ -368,65 +357,42 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
     }
 
     /// <summary>
-    /// Refuses a response object that names one of its parameters twice. JSON parsing keeps both and a read takes
-    /// one, so the other would ride along unread: a second <c>vp_token</c> or <c>response</c> beside the one
-    /// verified. The form a redirect wallet posts already refuses a repeated field (<see cref="SingleValue"/>);
-    /// this holds the JSON forms to the same rule.
+    /// Parses a wallet response's JSON under <see cref="StrictJson"/>, the rules the library's credential and
+    /// response JSON is held to. A refusal is a malformed response. The form a redirect wallet posts already
+    /// refuses a repeated field (<see cref="SingleValue"/>), so this holds the JSON forms to the same rule. The
+    /// refusal's own message is fixed text, so the sender's text does not reach it.
     /// </summary>
-    private static void RequireUniqueMembers(JsonElement responseObject, string source)
+    private static JsonDocument ParseResponseJson(string json, string source)
     {
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var member in responseObject.EnumerateObject())
+        try
         {
-            if (!names.Add(member.Name))
-            {
-                // The name is the sender's text, so it is not written into a message that reaches logs.
-                throw new WalletResponseException($"The {source} names one of its parameters more than once.");
-            }
+            return StrictJson.ParseDocument(json);
+        }
+        catch (JsonException e)
+        {
+            throw new WalletResponseException($"The {source} is not JSON with {StrictJson.Accepts}.", e);
         }
     }
 
     /// <summary>
-    /// Refuses a parsed response holding a name or string that is not text. Well formed JSON can carry an
-    /// escaped lone UTF-16 surrogate: it parses, and only the read that unescapes it fails, whichever read
-    /// that is. Reading every name and string once, here, straight after parsing, makes that a malformed
-    /// response, and leaves no later read of the document able to fail on it.
+    /// True only for text that is not JSON at all, which is how a bare compact presentation arrives. JSON that
+    /// breaks StrictJson's rules is JSON, and a string that is not valid UTF-16 is not a presentation either.
     /// </summary>
-    // Recursion is bounded: JsonDocument refuses nesting past its maximum depth when parsing.
-    private static void RequireReadableText(JsonElement element)
+    private static bool IsNotJson(string text)
     {
         try
         {
-            ReadAllText(element);
+            using var _ = JsonDocument.Parse(text);
+            return false;
         }
-        catch (InvalidOperationException e)
+        catch (JsonException)
         {
-            throw new WalletResponseException("The wallet response holds a name or string that is not valid text.", e);
+            return true;
         }
-
-        static void ReadAllText(JsonElement element)
+        catch (ArgumentException)
         {
-            switch (element.ValueKind)
-            {
-                case JsonValueKind.Object:
-                    foreach (var property in element.EnumerateObject())
-                    {
-                        _ = property.Name;
-                        ReadAllText(property.Value);
-                    }
-
-                    break;
-                case JsonValueKind.Array:
-                    foreach (var item in element.EnumerateArray())
-                    {
-                        ReadAllText(item);
-                    }
-
-                    break;
-                case JsonValueKind.String:
-                    _ = element.GetString();
-                    break;
-            }
+            // A string that is not valid UTF-16, which a host's own form reading can hand over.
+            return false;
         }
     }
 

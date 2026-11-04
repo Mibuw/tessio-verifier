@@ -45,22 +45,15 @@ public sealed partial class WalletResponseParser
         ArgumentNullException.ThrowIfNull(dataJson);
 
         string? sealedResponse;
-        try
+        using (var document = ParseResponseJson(dataJson, DcApiSource))
         {
-            using var document = JsonDocument.Parse(dataJson);
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
             {
                 throw new WalletResponseException($"The {DcApiSource} is not a JSON object.");
             }
 
-            RequireReadableText(root);
-            RequireUniqueMembers(root, DcApiSource);
             sealedResponse = SealedResponse(root);
-        }
-        catch (JsonException e)
-        {
-            throw new WalletResponseException($"The {DcApiSource} is not well formed JSON.", e);
         }
 
         if (sealedResponse is not null)

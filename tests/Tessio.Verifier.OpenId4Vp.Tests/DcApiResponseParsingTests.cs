@@ -37,6 +37,16 @@ public sealed class DcApiResponseParsingTests : IDisposable
         Assert.Null(parsed.Error);
     }
 
+    [Theory]
+    [InlineData("""{"vp_token":{"pid":["junk"],"pid":["a.b.c~"]}}""")]
+    [InlineData("""{"vp_token":{"pid":["a.b.c~"]},"note":1e400}""")]
+    public async Task ADataObjectBreakingTheJsonRules_IsRefused(string dataJson)
+    {
+        // A credential query named twice inside vp_token, or a number a double reads as infinity, used to pass: the
+        // repeat check looked at the top level only, and numbers were not checked at all.
+        await Assert.ThrowsAsync<WalletResponseException>(() => Parser().ParseDcApiAsync(dataJson));
+    }
+
     [Fact]
     public async Task AnEncryptedResponse_IsDecrypted_AndMarkedEncrypted()
     {

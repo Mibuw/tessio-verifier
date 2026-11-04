@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using Tessio.Verifier.Trust;
 
 namespace Tessio.Verifier.Core.Tests;
@@ -633,6 +634,47 @@ public class StatusListTests
 
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("payload is not JSON", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AStatusListTokenWithABadSignature_IsAnsweredOnItsSignature_BeforeItsPayload()
+    {
+        // The payload's rules are checked only once the token is authenticated, so a token that repeats a member and
+        // is forged is answered as forged: what an unauthenticated token says about itself is not judged.
+        using var builder = CredentialWithStatus(idx: 0);
+        var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], rewritePayloadJson: json =>
+            json.Replace("\"bits\":1", "\"bits\":8,\"bits\":1", StringComparison.Ordinal));
+        var forged = token[..^4] + (token[^4] == 'A' ? 'B' : 'A') + token[^3..];
+        var (verifier, _) = VerifierFor(builder, forged);
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("signature does not verify", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AStatusListTokenWithBytesThatAreNotUtf8_IsAStatusFailure_NotAStructureOne()
+    {
+        // RFC 8259 §8.1 requires UTF-8. The handler's claim reads throw on other bytes; the first of them, in the
+        // signer's identification, now answers malformed, and the status check says so about status, not about
+        // the credential. A token's other faults keep the precedence they had: this is answered where it throws.
+        using var builder = CredentialWithStatus(idx: 0);
+        var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], rewritePayloadBytes: bytes =>
+        {
+            var lst = Encoding.UTF8.GetBytes("\"lst\":\"");
+            var at = bytes.AsSpan().IndexOf(lst) + lst.Length;
+            return [.. bytes[..at], 0xFF, .. bytes[at..]];
+        });
+        var (verifier, _) = VerifierFor(builder, token);
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("not valid Unicode text", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Errors, e => e.Code == ErrorCodes.StructureInvalid);
     }
 
     public static TheoryData<string> MisshapenStatusLists => ["bits as a string", "status_list as a string"];

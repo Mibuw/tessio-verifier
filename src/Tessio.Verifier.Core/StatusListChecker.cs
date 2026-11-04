@@ -170,6 +170,11 @@ internal sealed class StatusListChecker
         {
             resolution = IssuerKeyResolver.Identify(token);
         }
+        catch (SdJwtProcessingException e) when (e.Code == ErrorCodes.StructureInvalid)
+        {
+            // A token that is not well-formed is not one whose signer is unknown: it is answered as malformed.
+            return [Error(ErrorCodes.StatusInvalid, $"The status list token is malformed: {e.Message}")];
+        }
         catch (SdJwtProcessingException e)
         {
             return [Error(ErrorCodes.StatusUnresolvable, $"The status list signer's key could not be resolved: {e.Message}")];

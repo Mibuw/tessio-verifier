@@ -4,6 +4,7 @@
 using System.Text.Json;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
+using Tessio.Verifier.Core;
 
 namespace Tessio.Verifier.OpenId4Vp;
 
@@ -38,9 +39,10 @@ internal static class JweHeaderRules
     /// <summary>Throws <see cref="WalletResponseException"/> when the header of <paramref name="jwe"/> breaks a rule.</summary>
     public static void Enforce(JsonWebToken jwe)
     {
+        var header = Base64UrlEncoder.DecodeBytes(jwe.EncodedHeader);
+
         // The reader's own limit sits above MaxDepth, so the depth refusal below is always the one that fires.
-        var reader = new Utf8JsonReader(Base64UrlEncoder.DecodeBytes(jwe.EncodedHeader), new JsonReaderOptions { MaxDepth = MaxDepth + 1 });
-        var names = new Stack<HashSet<string>>();
+        var reader = new Utf8JsonReader(header, new JsonReaderOptions { MaxDepth = MaxDepth + 1 });
         try
         {
             while (reader.Read())
@@ -49,14 +51,8 @@ internal static class JweHeaderRules
                 {
                     case JsonTokenType.StartObject or JsonTokenType.StartArray when reader.CurrentDepth >= MaxDepth:
                         throw new WalletResponseException("The encrypted response's header nests deeper than this library reads.");
-                    case JsonTokenType.StartObject:
-                        names.Push(new HashSet<string>(StringComparer.Ordinal));
-                        break;
-                    case JsonTokenType.EndObject:
-                        names.Pop();
-                        break;
-                    case JsonTokenType.PropertyName:
-                        Member(reader.GetString()!, names.Peek(), topLevel: names.Count == 1);
+                    case JsonTokenType.PropertyName when reader.CurrentDepth == 1:
+                        TopLevelMember(ref reader);
                         break;
                 }
             }
@@ -68,35 +64,36 @@ internal static class JweHeaderRules
             // object, a comment, stray text after it) is refused here.
             throw new WalletResponseException("The encrypted response's header is not a single JSON object.");
         }
-    }
 
-    private static void Member(string name, HashSet<string> seen, bool topLevel)
-    {
         // SPEC: RFC 7516 §5.2 step 4: "verify that the resulting JOSE Header does not contain duplicate Header
         // Parameter names". RFC 7517 §4 has a JWK parser reject duplicate members or keep the last, which covers
         // epk, and inside a member no specification defines, RFC 8259 §4 says "The names within an object
         // SHOULD be unique" and that otherwise the behaviour of software receiving them is "unpredictable".
-        // Refusing is the choice each text allows. Refused at every depth, because which of two values a reader
-        // takes is exactly what the two readers of this header, IdentityModel's and this one, could disagree on.
-        // Compared unescaped, so "alg" and "\u0061lg" are one name, as they are to any JSON reader, and
-        // ordinally, so "x" and "X" are two, as they are to IdentityModel.
-        if (!seen.Add(name))
+        // Refusing is the choice each text allows, at every depth, because which of two values a reader takes
+        // is exactly what the two readers of this header, IdentityModel's and this one, could disagree on.
+        // StrictJson owns that rule, and with it the rules on text and numbers. A refusal under them names the rule
+        // and never the sender's text, and the pass above has already refused anything that is not one JSON
+        // object, the one refusal whose message could quote it, so the message may be logged as it stands.
+        try
         {
-            // The name is not quoted: it is the sender's text, and this message may be logged as it stands.
-            throw new WalletResponseException("The encrypted response's header names one member twice.");
+            StrictJson.Check(header);
         }
-
-        if (!topLevel)
+        catch (JsonException e)
         {
-            return;
+            throw new WalletResponseException($"The encrypted response's header is not JSON with {StrictJson.Accepts}: {e.Message}");
         }
+    }
 
+    // Names are compared with ValueTextEquals, which unescapes as any JSON reader does, rather than read into a
+    // string: GetString throws for a name that is not valid text, and StrictJson refuses that above as a rule.
+    private static void TopLevelMember(ref Utf8JsonReader reader)
+    {
         // SPEC: RFC 7515 §4.1.11, applied to JWE by RFC 7516 §4.1.13: "If any of the listed extension Header
         // Parameters are not understood and supported by the recipient, then the JWS is invalid." This library
         // supports no extension, so every list it could be sent fails that rule, and the lists that would not
         // (empty, or naming a parameter JWS or JWA defines) are ones a producer "MUST NOT" send and a recipient
         // "MAY consider ... invalid". So any crit is refused.
-        if (name == "crit")
+        if (reader.ValueTextEquals("crit"))
         {
             throw new WalletResponseException(
                 "The encrypted response's header marks parameters as critical (crit); this library supports no JOSE extension.");
@@ -110,7 +107,7 @@ internal static class JweHeaderRules
         // is an application decision which algorithms may be used in a given context ... unless the
         // algorithms used in the JWE are acceptable to the application, it SHOULD consider the JWE to be
         // invalid."
-        if (name == "zip")
+        if (reader.ValueTextEquals("zip"))
         {
             throw new WalletResponseException(
                 "The encrypted response's header names a compression (zip); this library accepts no compressed response.");

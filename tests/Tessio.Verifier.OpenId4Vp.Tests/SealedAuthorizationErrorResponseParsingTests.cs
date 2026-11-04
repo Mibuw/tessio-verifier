@@ -83,6 +83,7 @@ public sealed class SealedAuthorizationErrorResponseParsingTests : IDisposable
     [Theory]
     [InlineData("""{"vp_token":{"pid":["junk"]},"vp_token":{"pid":["a.b.c~"]},"state":"s-1"}""")]
     [InlineData("""{"vp_token":{"pid":["a.b.c~"]},"state":"s-1","state":"s-2"}""")]
+    [InlineData("""{"vp_token":{"pid":["junk"],"pid":["a.b.c~"]},"state":"s-1"}""")]
     public async Task ASealedPayloadNamingAParameterTwice_IsRefused(string payloadJson)
     {
         // The form a wallet posts refuses a repeated field; the payload sealed inside it is held to the same rule,

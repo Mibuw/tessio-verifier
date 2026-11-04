@@ -50,6 +50,9 @@ internal sealed class TestCredentialBuilder : IDisposable
     /// <summary>Rewrites the serialized issuer payload before signing, for shapes a dictionary cannot hold (a repeated key).</summary>
     public Func<string, string>? RewritePayloadJson { get; set; }
 
+    /// <summary>Rewrites the issuer JWT's serialized JOSE header before signing, for a header the handler would not write.</summary>
+    public Func<string, string>? RewriteHeaderJson { get; set; }
+
     /// <summary>Rewrites the serialized KB-JWT payload before signing, for an iat no DateTimeOffset holds.</summary>
     public Func<string, string>? RewriteKbPayloadJson { get; set; }
 
@@ -229,7 +232,8 @@ internal sealed class TestCredentialBuilder : IDisposable
             RewritePayloadJson?.Invoke(JsonSerializer.Serialize(payload)) ?? JsonSerializer.Serialize(payload),
             new ECDsaSecurityKey(_issuerEcdsa),
             Typ,
-            Certificate is { } cert ? new List<string> { Convert.ToBase64String(cert.RawData) } : null);
+            Certificate is { } cert ? new List<string> { Convert.ToBase64String(cert.RawData) } : null,
+            RewriteHeaderJson);
 
         var withoutKb = issuerJwt + "~" + string.Concat(disclosures.Select(d => d + "~"));
         if (!IncludeKbJwt)
@@ -275,12 +279,14 @@ internal sealed class TestCredentialBuilder : IDisposable
     /// after review found that gap.
     /// <c>statusList</c> replaces the <c>status_list</c> claim, given the encoded <c>lst</c>, for a claim of
     /// the wrong JSON shape. <c>rewritePayloadJson</c> edits the serialized payload before signing, for JSON a
-    /// dictionary cannot hold, such as a repeated member.
+    /// dictionary cannot hold, such as a repeated member. <c>rewritePayloadBytes</c> edits the payload's UTF-8
+    /// bytes, for bytes a string cannot hold, such as ones that are not UTF-8.
     /// </remarks>
     public string BuildStatusListToken(
         string uri, int bits, byte[] statuses, object? exp = null, string typ = "statuslist+jwt", string? sub = null,
         object? ttl = null, X509Certificate2? signWith = null, bool includeIat = true, object? nbf = null, object? iat = null,
-        Func<string, object>? statusList = null, Func<string, string>? rewritePayloadJson = null)
+        Func<string, object>? statusList = null, Func<string, string>? rewritePayloadJson = null,
+        Func<byte[], byte[]>? rewritePayloadBytes = null)
     {
         var packed = new byte[(statuses.Length * bits + 7) / 8];
         for (var i = 0; i < statuses.Length; i++)
@@ -334,14 +340,15 @@ internal sealed class TestCredentialBuilder : IDisposable
 
         if (signWith is null)
         {
-            return SignJwt(payload, new ECDsaSecurityKey(_issuerEcdsa), typ, x5c: null);
+            return SignJwt(payload, new ECDsaSecurityKey(_issuerEcdsa), typ, x5c: null, rewritePayloadBytes: rewritePayloadBytes);
         }
 
         return SignJwt(
             payload,
             new ECDsaSecurityKey(signWith.GetECDsaPrivateKey() ?? throw new InvalidOperationException("signWith has no EC private key.")),
             typ,
-            [Convert.ToBase64String(signWith.RawData)]);
+            [Convert.ToBase64String(signWith.RawData)],
+            rewritePayloadBytes: rewritePayloadBytes);
     }
 
     public static string MakeDisclosure(string name, object? value) =>
@@ -350,19 +357,38 @@ internal sealed class TestCredentialBuilder : IDisposable
     public static string MakeArrayDisclosure(object? value) =>
         Base64UrlEncoder.Encode(JsonSerializer.Serialize(new[] { "salt-array", value }));
 
-    private static string SignJwt(string payload, SecurityKey key, string typ, List<string>? x5c)
+    private static string SignJwt(
+        string payload, SecurityKey key, string typ, List<string>? x5c,
+        Func<string, string>? rewriteHeaderJson = null, Func<byte[], byte[]>? rewritePayloadBytes = null)
     {
-        var handler = new JsonWebTokenHandler { SetDefaultTimesOnTokenCreation = false };
         var headers = new Dictionary<string, object> { ["typ"] = typ };
         if (x5c is not null)
         {
             headers["x5c"] = x5c;
         }
 
-        return handler.CreateToken(
-            payload,
-            new SigningCredentials(key, SecurityAlgorithms.EcdsaSha256),
-            headers);
+        if (rewriteHeaderJson is null && rewritePayloadBytes is null)
+        {
+            var handler = new JsonWebTokenHandler { SetDefaultTimesOnTokenCreation = false };
+            return handler.CreateToken(payload, new SigningCredentials(key, SecurityAlgorithms.EcdsaSha256), headers);
+        }
+
+        // Signed by hand, for a header or payload the handler would not write: a repeated member, or bytes that
+        // are not UTF-8. RFC 7515 §5.1: the signature is over ASCII(BASE64URL(header) || '.' || BASE64URL(payload)),
+        // and RFC 7518 §3.4 wants ES256's r and s as fixed-length big-endian, which is .NET's default format.
+        var withAlg = new Dictionary<string, object> { ["alg"] = SecurityAlgorithms.EcdsaSha256 };
+        foreach (var (name, value) in headers)
+        {
+            withAlg[name] = value;
+        }
+
+        var headerJson = JsonSerializer.Serialize(withAlg);
+        headerJson = rewriteHeaderJson?.Invoke(headerJson) ?? headerJson;
+        var payloadBytes = Encoding.UTF8.GetBytes(payload);
+        payloadBytes = rewritePayloadBytes?.Invoke(payloadBytes) ?? payloadBytes;
+        var signingInput = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(headerJson)) + "." + Base64UrlEncoder.Encode(payloadBytes);
+        var signature = ((ECDsaSecurityKey)key).ECDsa.SignData(Encoding.ASCII.GetBytes(signingInput), HashAlgorithmName.SHA256);
+        return signingInput + "." + Base64UrlEncoder.Encode(signature);
     }
 
     public void Dispose()

@@ -71,7 +71,18 @@ internal sealed class IssuerKeyResolver
     /// </remarks>
     public static IssuerKeyResolution Identify(JsonWebToken issuerJwt)
     {
-        var iss = issuerJwt.TryGetClaim("iss", out var issClaim) ? issClaim.Value : null;
+        // The handler builds every claim to answer for one, and throws InvalidOperationException when any string
+        // in the payload is not valid UTF-8. Answered here as malformed, so no caller meets an exception it did not
+        // ask for, and a caller that answers malformed and unresolvable differently can tell this one apart.
+        string? iss;
+        try
+        {
+            iss = issuerJwt.TryGetClaim("iss", out var issClaim) ? issClaim.Value : null;
+        }
+        catch (InvalidOperationException)
+        {
+            throw new SdJwtProcessingException(ErrorCodes.StructureInvalid, "The token's claims are not valid Unicode text.");
+        }
 
         var chain = ReadX5cHeader(issuerJwt);
         if (chain is not null)
@@ -116,8 +127,9 @@ internal sealed class IssuerKeyResolver
     private static List<X509Certificate2>? ReadX5cHeader(JsonWebToken issuerJwt)
     {
         // SPEC: RFC 7515 §4.1.6 — x5c is an array of base64 (standard, NOT base64url) DER certificates,
-        // the first entry being the end-entity (signing) certificate.
-        using var header = JsonDocument.Parse(Base64UrlEncoder.Decode(issuerJwt.EncodedHeader));
+        // the first entry being the end-entity (signing) certificate. Parsed strictly, so a header naming x5c twice
+        // has no chain to pick; the handler has already decoded it, so only StrictJson's own rules can refuse it.
+        using var header = ParseHeader(issuerJwt.EncodedHeader);
         if (!header.RootElement.TryGetProperty("x5c", out var x5c))
         {
             return null;
@@ -139,6 +151,19 @@ internal sealed class IssuerKeyResolver
         {
             throw new SdJwtProcessingException(
                 ErrorCodes.IssuerKeyUnresolvable, "The x5c header is not a valid base64 DER certificate chain.");
+        }
+    }
+
+    private static JsonDocument ParseHeader(string encodedHeader)
+    {
+        try
+        {
+            return StrictJson.ParseDocument(Base64UrlEncoder.DecodeBytes(encodedHeader));
+        }
+        catch (Exception e) when (e is JsonException or FormatException)
+        {
+            throw new SdJwtProcessingException(
+                ErrorCodes.StructureInvalid, $"The token's JOSE header is not JSON with {StrictJson.Accepts}.");
         }
     }
 
@@ -377,7 +402,9 @@ internal sealed class IssuerKeyResolver
             var body = await OutboundFetch.GetBoundedAsync(
                 _httpClient, uri, accept: null, "issuer metadata or key set", OutboundFetch.MaxMetadataBytes, ct)
                 .ConfigureAwait(false);
-            using var document = JsonDocument.Parse(body);
+            // Unsigned and from a host the credential names, so held to the same rules as signed JSON: a key set
+            // or metadata naming jwks or issuer twice has no single meaning. A refusal is a JsonException below.
+            using var document = StrictJson.ParseDocument(body);
             return document.RootElement.Clone();
         }
         catch (Exception e) when (e is HttpRequestException or JsonException or TaskCanceledException)

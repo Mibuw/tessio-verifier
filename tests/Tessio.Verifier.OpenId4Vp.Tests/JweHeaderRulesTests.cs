@@ -101,8 +101,19 @@ public sealed class JweHeaderRulesTests : IDisposable
     public async Task A_member_named_twice_is_refused(string header)
     {
         var refused = await Assert.ThrowsAsync<WalletResponseException>(() => ParseUnder(header));
-        Assert.Contains("twice", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("repeats a property name", refused.Message, StringComparison.Ordinal);
         Assert.DoesNotContain("forged", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{\"alg\":\"ECDH-ES\",\"enc\":\"A128GCM\",\"epk\":EPK,\"x\":{\"\\uD800\":1}}")]
+    [InlineData("{\"alg\":\"ECDH-ES\",\"enc\":\"A128GCM\",\"epk\":EPK,\"n\":1e400}")]
+    public async Task A_header_with_text_or_a_number_JSON_rules_refuse_is_refused_not_thrown(string header)
+    {
+        // A name that is not valid text used to throw out of the parser when read into a string, and a number a
+        // double reads as infinity used to pass. Both are StrictJson's rules, applied here as everywhere else.
+        var refused = await Assert.ThrowsAsync<WalletResponseException>(() => ParseUnder(header));
+        Assert.Contains("is not JSON with", refused.Message, StringComparison.Ordinal);
     }
 
     [Theory]

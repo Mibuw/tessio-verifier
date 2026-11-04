@@ -50,6 +50,34 @@ public class SdJwtHostileJsonTests
     }
 
     [Fact]
+    public async Task VerifyAsync_AHeaderSignedByHand_StillVerifies()
+    {
+        // The builder signs by hand whenever a header rewrite is set. Without a rewrite that changes anything, the
+        // credential verifies, so a refusal in the test below comes from the header, not from the signing.
+        var builder = new TestCredentialBuilder { RewriteHeaderJson = json => json };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Code}: {e.Message}")));
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AJoseHeaderNamingX5cTwice_IsRefused()
+    {
+        // RFC 8259 §4: parsers disagree on a repeated name, so a header carrying two chains has no single signer.
+        var builder = new TestCredentialBuilder
+        {
+            RewriteHeaderJson = json => json.Replace("\"typ\":", "\"x5c\":[\"AA==\"],\"typ\":", StringComparison.Ordinal),
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.StructureInvalid
+                                            && e.Message.Contains("JOSE header", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task VerifyAsync_RepeatedKeyInDisclosedObject_IsRefused()
     {
         var builder = new TestCredentialBuilder();

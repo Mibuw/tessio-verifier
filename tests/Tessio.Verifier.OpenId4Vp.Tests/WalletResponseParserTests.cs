@@ -64,6 +64,15 @@ public class WalletResponseParserTests
             new WalletResponseParser().ParseAsync(FormResponse(("vp_token", vpToken))));
     }
 
+    [Fact]
+    public async Task DirectPost_AVpTokenNamingACredentialQueryTwice_IsRefused_NotReadAsAPresentation()
+    {
+        // JSON, so not a bare compact presentation, and held to StrictJson's rules: a credential query named twice
+        // has no single answer. It used to yield a presentation for each.
+        await Assert.ThrowsAsync<WalletResponseException>(() =>
+            new WalletResponseParser().ParseAsync(FormResponse(("vp_token", """{"pid":["junk"],"pid":["a.b.c~"]}"""))));
+    }
+
     /// <summary>A host building the form itself can hand over a string that is not valid UTF-16 at all.</summary>
     [Fact]
     public async Task DirectPost_AVpTokenThatIsNotValidUtf16_IsRefusedAsAMalformedResponse()

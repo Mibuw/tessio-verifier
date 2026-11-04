@@ -54,6 +54,29 @@ public class SdJwtVcVerifierTests
         Assert.Equal(0, trust.SeenChainLength);
     }
 
+    public static TheoryData<string> MetadataRepeats => ["issuer", "jwks"];
+
+    [Theory]
+    [MemberData(nameof(MetadataRepeats))]
+    public async Task IssuerMetadataNamingAMemberTwice_IsRefused(string member)
+    {
+        // Unsigned, from a host the credential names, and held to the rules signed JSON is: RFC 8259 §4 leaves a
+        // repeated name to the parser, so metadata carrying two issuers or two key sets has no single answer.
+        using var builder = new TestCredentialBuilder();
+        var jwks = builder.BuildJwksJson();
+        var metadata = member == "issuer"
+            ? $$"""{"issuer":"https://other.example","issuer":"{{builder.Issuer}}","jwks":{{jwks}}}"""
+            : $$"""{"issuer":"{{builder.Issuer}}","jwks":{"keys":[]},"jwks":{{jwks}}}""";
+        var http = new FakeHttpHandler().Map("https://issuer.example/.well-known/jwt-vc-issuer", metadata);
+
+        var result = await new SdJwtVcVerifier(new FakeTrustListResolver(), httpClient: new HttpClient(http))
+            .VerifyAsync(Credential(builder.Build()), Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerKeyUnresolvable
+                                            && e.Message.Contains("repeats a property name", StringComparison.Ordinal));
+    }
+
     /// <summary>
     /// The trust provenance the resolver returns has to REACH the caller, on both verdicts.
     /// </summary>
