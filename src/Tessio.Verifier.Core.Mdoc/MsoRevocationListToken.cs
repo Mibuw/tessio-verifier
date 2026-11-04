@@ -59,7 +59,7 @@ internal sealed record MsoRevocationListToken(
 
     private const int CoseSign1Tag = 18;
     private static readonly CoseHeaderLabel TypeLabel = new(16);
-    private static readonly CoseHeaderLabel X5ChainLabel = new(33);
+    private static readonly CoseHeaderLabel X5ChainLabel = new(CoseX509.X5Chain);
 
     /// <summary>
     /// The decoded token, or the reason it is not one. Never throws for anything about the bytes.
@@ -124,7 +124,7 @@ internal sealed record MsoRevocationListToken(
             throw new InvalidListException("The MSO revocation list carries no embedded claims.");
         }
 
-        var chain = ReadX5Chain(x5chain.EncodedValue);
+        var chain = CoseX509.ReadValue(x5chain.EncodedValue, CborConformanceMode.Strict);
         VerifySignature(message, chain[0], curve);
 
         return MsoRevocationListClaims.Read(content.ToArray(), kind, chain);
@@ -157,30 +157,6 @@ internal sealed record MsoRevocationListToken(
               && reader.ReadUInt64() == StatusListCoapContentFormat;
     }
 
-    // SPEC: RFC 9360 section 2, x5chain is one bstr certificate or an array of them, end-entity first.
-    private static ReadOnlyMemory<byte>[] ReadX5Chain(ReadOnlyMemory<byte> encoded)
-    {
-        var reader = new CborReader(encoded);
-        List<ReadOnlyMemory<byte>> chain = [];
-        if (reader.PeekState() == CborReaderState.StartArray)
-        {
-            reader.ReadStartArray();
-            while (reader.PeekState() != CborReaderState.EndArray)
-            {
-                chain.Add(reader.ReadByteString());
-            }
-
-            reader.ReadEndArray();
-        }
-        else
-        {
-            chain.Add(reader.ReadByteString());
-        }
-
-        return chain.Count > 0
-            ? [.. chain]
-            : throw new InvalidListException("The MSO revocation list's x5chain is empty.");
-    }
 
     /// <summary>Why the bytes are not a usable MSO revocation list; becomes the problem <see cref="Decode"/> returns.</summary>
     internal sealed class InvalidListException(string message) : Exception(message);

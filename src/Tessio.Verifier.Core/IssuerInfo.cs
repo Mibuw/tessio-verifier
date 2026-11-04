@@ -33,7 +33,8 @@ public sealed record IssuerInfo
     /// <summary>
     /// How the issuer's signing key was resolved. Canonical values:
     /// <c>"jwt-vc-issuer-metadata"</c> (web resolution via the <c>iss</c> HTTPS URI) or
-    /// <c>"x5c"</c> (X.509 chain carried in the credential header).
+    /// <c>"x5c"</c> (the X.509 route: a chain carried in the credential header, or, with
+    /// <see cref="SdJwtVcVerifierOptions.ResolveX5u"/> on, fetched from its <c>x5u</c>).
     /// </summary>
     // SPEC: SD-JWT VC issuer key resolution — two mechanisms (JWT VC Issuer Metadata + X.509).
     public required string KeyResolutionMethod { get; init; }

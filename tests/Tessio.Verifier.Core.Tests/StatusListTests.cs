@@ -297,6 +297,37 @@ public class StatusListTests
     // are the only thing pinning the claim that a self-signed status token served from the issuer's own
     // uri is refused.
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task AStatusListTokenNamingItsKeyByX5u_IsNeverResolvedByIt(bool resolveX5u)
+    {
+        // SPEC: HAIP 1.0 Final section 6.1, the status list token's key "MUST be included in the x5c JOSE header".
+        // The x5u that CIR (EU) 2026/1731 Annex I allows is for the PID's own signature. So the option changes
+        // nothing here: the token resolves by its iss either way, whose metadata key did not sign it.
+        using var builder = CredentialWithStatus(idx: 0);
+        using var signer = SelfSignedStatusSigner("status-signer");
+        const string signerUrl = "https://status.example/signer.pem";
+        var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], signWith: signer, rewriteHeaderJson: json =>
+        {
+            var header = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+            header.Remove("x5c");
+            header["x5u"] = signerUrl;
+            header["x5t#S256"] = Microsoft.IdentityModel.Tokens.Base64UrlEncoder.Encode(SHA256.HashData(signer.RawData));
+            return header.ToJsonString();
+        });
+        var (verifier, http) = VerifierFor(builder, token, new SdJwtVcVerifierOptions { ResolveX5u = resolveX5u });
+        http.MapBytes(signerUrl, System.Text.Encoding.ASCII.GetBytes(signer.ExportCertificatePem()));
+
+        var result = await verifier.VerifyAsync(new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        var error = Assert.Single(result.Errors);
+        Assert.Equal("status_invalid", error.Code);
+        Assert.Contains("signature does not verify", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(signerUrl, http.Requested);
+    }
+
     /// <summary>
     /// The trust seam failing for the STATUS SIGNER, while the credential's own issuer is decided, is
     /// reported as the status being unresolvable, with the cause, and as nothing else. The credential is

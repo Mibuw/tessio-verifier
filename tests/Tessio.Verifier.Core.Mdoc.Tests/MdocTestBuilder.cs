@@ -136,6 +136,27 @@ internal sealed class MdocTestBuilder : IDisposable
     /// <summary>Marks these labels critical in the deviceSignature's protected header, as for issuerAuth.</summary>
     public int[]? DeviceSignatureCritical { get; set; }
 
+    /// <summary>Names the Document Signer certificate by this x5u, in the protected header, instead of an x5chain.</summary>
+    public string? X5U { get; set; }
+
+    /// <summary>Writes the x5u in the unprotected header instead.</summary>
+    public bool X5UUnprotected { get; set; }
+
+    /// <summary>Keeps the x5chain as well when <see cref="X5U"/> is set.</summary>
+    public bool X5ChainBesideX5U { get; set; }
+
+    /// <summary>Writes an x5t thumbprint of the Document Signer certificate, protected unless <see cref="X5TUnprotected"/>.</summary>
+    public bool X5T { get; set; }
+
+    /// <summary>Writes the x5t in the unprotected header instead.</summary>
+    public bool X5TUnprotected { get; set; }
+
+    /// <summary>The x5t hash algorithm; SHA-256 (-16) by default.</summary>
+    public int X5TAlgorithm { get; set; } = -16;
+
+    /// <summary>Writes this hash in the x5t instead of the Document Signer certificate's.</summary>
+    public byte[]? X5THash { get; set; }
+
     /// <summary>Writes these bytes as issuerAuth instead of the signed one, for decoder-level refusals.</summary>
     public byte[]? IssuerAuthBytes { get; set; }
 
@@ -328,7 +349,36 @@ internal sealed class MdocTestBuilder : IDisposable
 
         var signer = new CoseSigner(SignerKeyOverride ?? _dsKey, HashAlgorithmName.SHA256);
         // SPEC: RFC 9360 — x5chain at header label 33; DS certificate first, then the chain.
-        signer.UnprotectedHeaders.Add(new CoseHeaderLabel(33), CoseHeaderValue.FromEncodedValue(EncodeChain()));
+        if (X5U is null || X5ChainBesideX5U)
+        {
+            signer.UnprotectedHeaders.Add(new CoseHeaderLabel(33), CoseHeaderValue.FromEncodedValue(EncodeChain()));
+        }
+
+        if (X5U is { } url)
+        {
+            // CIR 2026/1731 Annex I has a PID carry x5u and x5t in the protected header.
+            (X5UUnprotected ? signer.UnprotectedHeaders : signer.ProtectedHeaders)
+                .Add(new CoseHeaderLabel(35), CoseHeaderValue.FromString(url));
+        }
+
+        if (X5T)
+        {
+            var thumbprint = new CborWriter();
+            thumbprint.WriteStartArray(2);
+            thumbprint.WriteInt32(X5TAlgorithm);
+            thumbprint.WriteByteString(X5THash ?? SHA256.HashData(DsCertificate.RawData));
+            thumbprint.WriteEndArray();
+            var value = CoseHeaderValue.FromEncodedValue(thumbprint.Encode());
+            if (X5TUnprotected)
+            {
+                signer.UnprotectedHeaders.Add(new CoseHeaderLabel(34), value);
+            }
+            else
+            {
+                signer.ProtectedHeaders.Add(new CoseHeaderLabel(34), value);
+            }
+        }
+
         MarkCritical(signer, IssuerAuthCritical);
         var issuerAuth = IssuerAuthDetached
             ? CoseSign1Message.SignDetached(payload.Encode(), signer)
