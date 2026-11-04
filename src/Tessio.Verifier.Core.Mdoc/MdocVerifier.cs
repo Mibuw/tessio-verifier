@@ -29,6 +29,7 @@ public sealed partial class MdocVerifier
     private readonly MdocVerifierOptions _options;
     private readonly TimeProvider _clock;
     private readonly MsoRevocationChecker _revocation;
+    private readonly CertificateUrlFetcher? _x5u;
 
     /// <summary>Creates a verifier.</summary>
     /// <param name="trustListResolver">
@@ -40,7 +41,9 @@ public sealed partial class MdocVerifier
     /// <param name="options">Policy options; defaults match the SD-JWT verifier.</param>
     /// <param name="clock">Time source for the MSO validity window; system clock when null.</param>
     /// <param name="httpClient">
-    /// HTTP client for MSO revocation lists. Every fetch, on any client, has a deadline and a size limit.
+    /// HTTP client for MSO revocation lists, and for the Document Signer certificate an issuerAuth names by
+    /// <c>x5u</c> when it carries no <c>x5chain</c> and <see cref="MdocVerifierOptions.ResolveX5u"/> is on. Every
+    /// fetch, on any client, has a deadline and a size limit.
     /// When null, a shared default also refuses non-public addresses and redirects, and ignores the process
     /// proxy. A client supplied here gets none of those three, so it must enforce them itself.
     /// </param>
@@ -56,6 +59,7 @@ public sealed partial class MdocVerifier
         _clock = clock ?? TimeProvider.System;
         _revocation = new MsoRevocationChecker(
             httpClient ?? DefaultHttpClient, _trustListResolver, _clock, _options.ClockSkew, _options.StatusListCacheDuration);
+        _x5u = _options.ResolveX5u ? new CertificateUrlFetcher(httpClient ?? DefaultHttpClient, _clock) : null;
     }
 
     /// <summary>Creates a verifier. Kept so code compiled against earlier versions still binds.</summary>
@@ -125,7 +129,7 @@ public sealed partial class MdocVerifier
         var document = response.Documents[0];
 
         // Structural: issuerAuth signature and Document Signer key (fails fast on error).
-        var resolution = IssuerAuthVerifier.Verify(document.IssuerAuth);
+        var resolution = await IssuerAuthVerifier.VerifyAsync(document.IssuerAuth, _x5u, ct).ConfigureAwait(false);
         var mso = DeviceResponseParser.ParseMso(document.IssuerAuth);
 
         // Policy checks accumulate.
@@ -186,6 +190,12 @@ public sealed partial class MdocVerifier
         if (errors.Count > 0)
         {
             return VerificationResult.Invalid(errors, issuer) with { CredentialType = document.DocType };
+        }
+
+        // Verified in full, its chain trusted: only now is an x5u resource worth keeping.
+        if (resolution.FetchedX5u is { } fetched)
+        {
+            _x5u?.Remember(fetched);
         }
 
         return new VerificationResult

@@ -88,11 +88,13 @@ public sealed class Iso18013AnnexDConformanceTests
     }
 
     [Fact]
-    public void IssuerAuth_VerifiesAgainstThePublishedDsCertificate()
+    public async Task IssuerAuth_VerifiesAgainstThePublishedDsCertificate()
     {
         var document = DeviceResponseParser.Parse(DeviceResponseBase64Url()).Documents[0];
 
-        var resolution = IssuerAuthVerifier.Verify(document.IssuerAuth);
+        // The vector carries an x5chain, so nothing is fetched.
+        var resolution = await IssuerAuthVerifier.VerifyAsync(
+            document.IssuerAuth, new CertificateUrlFetcher(new HttpClient(), TimeProvider.System), CancellationToken.None);
 
         // The x5chain leaf must be byte-identical to the separately published DS certificate.
         Assert.Equal(Iso18013AnnexDVectors.DsCertificate, resolution.CertificateChain[0].ToArray());

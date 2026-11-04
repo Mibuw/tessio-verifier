@@ -286,7 +286,7 @@ internal sealed class TestCredentialBuilder : IDisposable
         string uri, int bits, byte[] statuses, object? exp = null, string typ = "statuslist+jwt", string? sub = null,
         object? ttl = null, X509Certificate2? signWith = null, bool includeIat = true, object? nbf = null, object? iat = null,
         Func<string, object>? statusList = null, Func<string, string>? rewritePayloadJson = null,
-        Func<byte[], byte[]>? rewritePayloadBytes = null)
+        Func<byte[], byte[]>? rewritePayloadBytes = null, Func<string, string>? rewriteHeaderJson = null)
     {
         var packed = new byte[(statuses.Length * bits + 7) / 8];
         for (var i = 0; i < statuses.Length; i++)
@@ -348,7 +348,8 @@ internal sealed class TestCredentialBuilder : IDisposable
             new ECDsaSecurityKey(signWith.GetECDsaPrivateKey() ?? throw new InvalidOperationException("signWith has no EC private key.")),
             typ,
             [Convert.ToBase64String(signWith.RawData)],
-            rewritePayloadBytes: rewritePayloadBytes);
+            rewriteHeaderJson,
+            rewritePayloadBytes);
     }
 
     public static string MakeDisclosure(string name, object? value) =>

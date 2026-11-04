@@ -168,7 +168,8 @@ internal sealed class StatusListChecker
         IssuerKeyResolution resolution;
         try
         {
-            resolution = IssuerKeyResolver.Identify(token);
+            // Never by x5u, whatever the option, so the token resolves as it did before x5u was read.
+            resolution = IssuerKeyResolver.IdentifyStatusListSigner(token);
         }
         catch (SdJwtProcessingException e) when (e.Code == ErrorCodes.StructureInvalid)
         {

@@ -31,13 +31,30 @@ internal sealed record IssuerKeyResolution
     /// </summary>
     public string? ClaimedIssuer { get; init; }
 
-    /// <summary>DER certificate chain from <c>x5c</c>; empty for metadata resolution.</summary>
+    /// <summary>
+    /// DER certificate chain from <c>x5c</c>, or from <c>x5u</c> once fetched; empty for metadata resolution and
+    /// before an <c>x5u</c> is fetched.
+    /// </summary>
     public required ReadOnlyMemory<byte>[] CertificateChain { get; init; }
+
+    /// <summary>
+    /// The <c>x5u</c> still to fetch, with the <c>x5t#S256</c> its first certificate must match. Set by
+    /// <see cref="IssuerKeyResolver.Identify"/> on the X.509 route when the header carries no <c>x5c</c>; null
+    /// once <see cref="IssuerKeyResolver.FetchKeysAsync"/> has fetched it, and on every other route.
+    /// </summary>
+    public (string Url, byte[] Thumbprint, string? Iss)? PendingX5u { get; init; }
+
+    /// <summary>
+    /// The <c>x5u</c> resource the chain came from, once fetched, for <see cref="IssuerKeyResolver.Remember"/> to
+    /// keep once the credential has verified in full. Null on every other route.
+    /// </summary>
+    public CertificateUrlResource? FetchedX5u { get; init; }
 }
 
 /// <summary>
 /// Resolves the issuer's signing key via the two SD-JWT VC mechanisms: the X.509 chain in the
-/// <c>x5c</c> JOSE header, or JWT VC Issuer Metadata fetched from the <c>iss</c> HTTPS URI.
+/// <c>x5c</c> JOSE header (or, when x5u resolution is on, fetched from its <c>x5u</c>), or JWT VC Issuer
+/// Metadata fetched from the <c>iss</c> HTTPS URI.
 /// </summary>
 // SPEC: draft-ietf-oauth-sd-jwt-vc-13 §3.5 (Issuer Signature Mechanisms) and §5 (JWT VC Issuer Metadata).
 internal sealed class IssuerKeyResolver
@@ -57,19 +74,50 @@ internal sealed class IssuerKeyResolver
     private const int UriGeneralNameTag = 6;
 
     private readonly HttpClient _httpClient;
+    private readonly CertificateUrlFetcher? _certificates;
 
-    public IssuerKeyResolver(HttpClient httpClient) => _httpClient = httpClient;
+    /// <param name="httpClient">Fetches JWT VC Issuer Metadata.</param>
+    /// <param name="certificates">Fetches an x5u's certificate; null when x5u resolution is off (SdJwtVcVerifierOptions.ResolveX5u).</param>
+    public IssuerKeyResolver(HttpClient httpClient, CertificateUrlFetcher? certificates)
+    {
+        _httpClient = httpClient;
+        _certificates = certificates;
+    }
 
     /// <summary>
     /// Who signed the token, read from its own header and claims with no network access: the issuer
-    /// identifier, the route, and the <c>x5c</c> chain with its key where there is one.
+    /// identifier, the route, and the <c>x5c</c> chain with its key where there is one. With x5u resolution on, an
+    /// <c>x5u</c> bound by <c>x5t#S256</c>, with no <c>x5c</c>, is left in <see cref="IssuerKeyResolution.PendingX5u"/>
+    /// for <see cref="FetchKeysAsync"/>. Otherwise the <c>x5u</c> is ignored, as before it was read at all, so such a
+    /// token resolves by its <c>iss</c> or not at all.
     /// </summary>
     /// <remarks>
     /// Separate from <see cref="FetchKeysAsync"/> so a caller can decide whether it trusts the issuer
     /// before any request is made. On the metadata route the key lives on the host the token names, and
     /// the identifier the trust seam judges is known without it.
     /// </remarks>
-    public static IssuerKeyResolution Identify(JsonWebToken issuerJwt)
+    public IssuerKeyResolution Identify(JsonWebToken issuerJwt) => IdentifyRoute(
+        issuerJwt,
+        resolveX5u: _certificates is not null,
+        "The credential names its signing certificate by x5u, and x5u resolution is off (SdJwtVcVerifierOptions.ResolveX5u).");
+
+    /// <summary>
+    /// <see cref="Identify(JsonWebToken)"/> for a status list token, which never resolves by <c>x5u</c>, whatever the
+    /// option: it resolves exactly as a credential does with x5u resolution off.
+    /// </summary>
+    // SPEC: HAIP 1.0 Final section 6.1, the status list token's verifying key "MUST be included in the x5c JOSE
+    // header". The x5u that CIR (EU) 2026/1731 Annex I allows is for the PID's own signature.
+    public static IssuerKeyResolution IdentifyStatusListSigner(JsonWebToken token) => IdentifyRoute(
+        token,
+        resolveX5u: false,
+        "The status list token names its key by x5u; HAIP 1.0 section 6.1 has it in x5c.");
+
+    /// <summary>
+    /// The X.509 route when the header carries <c>x5c</c>, or, with <paramref name="resolveX5u"/>, a bound
+    /// <c>x5u</c>; otherwise the metadata route. <paramref name="x5uRefusal"/> answers a token whose only way to a
+    /// key is an <c>x5u</c> this call does not resolve.
+    /// </summary>
+    private static IssuerKeyResolution IdentifyRoute(JsonWebToken issuerJwt, bool resolveX5u, string x5uRefusal)
     {
         // The handler builds every claim to answer for one, and throws InvalidOperationException when any string
         // in the payload is not valid UTF-8. Answered here as malformed, so no caller meets an exception it did not
@@ -84,17 +132,55 @@ internal sealed class IssuerKeyResolver
             throw new SdJwtProcessingException(ErrorCodes.StructureInvalid, "The token's claims are not valid Unicode text.");
         }
 
-        var chain = ReadX5cHeader(issuerJwt);
+        // x5t#S256 is read only on the routes that use it, so on the metadata route it is ignored as it always was.
+        using var header = ParseHeader(issuerJwt.EncodedHeader);
+        var chain = ReadX5cHeader(header.RootElement);
         if (chain is not null)
         {
+            RequireThumbprintMatch(chain[0].RawData, ReadX5tS256(header.RootElement));
             return ResolveFromX5c(chain, iss);
+        }
+
+        // With x5u resolution off, an x5u is only noticed, for the refusal message below, never read.
+        var hasX5u = header.RootElement.TryGetProperty("x5u", out _);
+        if (hasX5u && resolveX5u)
+        {
+            var thumbprint = ReadX5tS256(header.RootElement);
+            // SPEC: CIR (EU) 2026/1731 Annex I, replacing the annex of CIR (EU) 2024/2977, for a PID: "The
+            // Protected Header of the digital signature signing a person identification data in SD-JWT VC format
+            // shall contain the x5u and the x5t#S256 header parameters, specified in RFC 7515." RFC 7515 section
+            // 4.1.5 lets x5u stand alone; it is used here only with x5t#S256, so the key is the one the signature
+            // names and not whichever certificate the URL serves. An unbound x5u is ignored, and the token
+            // resolves by its iss as it would with x5u resolution off. HAIP 1.0 section 6.1.1 has the issuer send
+            // x5c; that binds the issuer, and a PID carrying what the act requires is still verified.
+            if (thumbprint is not null)
+            {
+                var x5u = ReadX5u(header.RootElement);
+                return new IssuerKeyResolution
+                {
+                    Keys = [],
+                    Method = SdJwtConstants.KeyResolutionX5c,
+                    Issuer = iss ?? x5u,
+                    CertificateChain = [],
+                    PendingX5u = (x5u, thumbprint, iss),
+                };
+            }
+
+            if (iss is null)
+            {
+                throw new SdJwtProcessingException(
+                    ErrorCodes.IssuerKeyUnresolvable,
+                    "The x5u header is not bound by an x5t#S256 thumbprint, so the certificate it points at cannot be relied on.");
+            }
         }
 
         if (iss is null)
         {
             throw new SdJwtProcessingException(
                 ErrorCodes.IssuerKeyUnresolvable,
-                "The credential carries neither an x5c header nor an iss claim; no key resolution mechanism applies.");
+                hasX5u
+                    ? x5uRefusal
+                    :"The credential carries neither an x5c header nor an iss claim; no key resolution mechanism applies.");
         }
 
         if (!Uri.TryCreate(iss, UriKind.Absolute, out var issUri) || issUri.Scheme != Uri.UriSchemeHttps)
@@ -117,20 +203,114 @@ internal sealed class IssuerKeyResolver
     /// The identified issuer with its keys. The <c>x5c</c> route already has them. The metadata route
     /// fetches JWT VC Issuer Metadata from the <c>iss</c> host.
     /// </summary>
-    public async Task<IssuerKeyResolution> FetchKeysAsync(IssuerKeyResolution identified, CancellationToken ct) =>
-        identified.Method == SdJwtConstants.KeyResolutionMetadata
-            ? identified with { Keys = await FetchMetadataKeysAsync(identified.Issuer, ct).ConfigureAwait(false) }
+    public async Task<IssuerKeyResolution> FetchKeysAsync(IssuerKeyResolution identified, CancellationToken ct)
+    {
+        if (identified.Method == SdJwtConstants.KeyResolutionMetadata)
+        {
+            return identified with { Keys = await FetchMetadataKeysAsync(identified.Issuer, ct).ConfigureAwait(false) };
+        }
+
+        return identified.PendingX5u is { } pending
+            ? await FetchX5uAsync(pending.Url, pending.Thumbprint, pending.Iss, ct).ConfigureAwait(false)
             : identified;
+    }
 
-    // ---- X.509 (x5c) --------------------------------------------------------------------------
+    // ---- X.509 (x5c, x5u) ---------------------------------------------------------------------
 
-    private static List<X509Certificate2>? ReadX5cHeader(JsonWebToken issuerJwt)
+    // SPEC: RFC 7515 section 4.1.5, the x5u resource is "the certificate or certificate chain ... in PEM-encoded
+    // form", and "The certificate containing the public key corresponding to the key used to digitally sign the JWS
+    // MUST be the first certificate."
+    private async Task<IssuerKeyResolution> FetchX5uAsync(string url, byte[] thumbprint, string? iss, CancellationToken ct)
+    {
+        // Identify sets PendingX5u only when x5u resolution is on, which is when _certificates exists.
+        CertificateUrlResource resource;
+        try
+        {
+            resource = await _certificates!.FetchAsync(url, thumbprint, ct).ConfigureAwait(false);
+        }
+        catch (CertificateUrlException e)
+        {
+            throw new SdJwtProcessingException(ErrorCodes.IssuerKeyUnresolvable, e.Message);
+        }
+
+        var chain = new List<X509Certificate2>();
+        try
+        {
+            var collection = new X509Certificate2Collection();
+            collection.ImportFromPem(System.Text.Encoding.ASCII.GetString(resource.Body));
+            chain.AddRange(collection);
+        }
+        catch (CryptographicException)
+        {
+            // Fall through to the empty check: a resource holding no certificate is refused below.
+        }
+
+        if (chain.Count == 0)
+        {
+            throw new SdJwtProcessingException(
+                ErrorCodes.IssuerKeyUnresolvable, "The resource at the x5u is not a PEM certificate or certificate chain.");
+        }
+
+        RequireThumbprintMatch(chain[0].RawData, thumbprint);
+        return ResolveFromX5c(chain, iss) with { FetchedX5u = resource };
+    }
+
+    /// <summary>
+    /// Keeps the <c>x5u</c> resource <paramref name="resolution"/> was fetched from. Called only for a credential that
+    /// verified in full, its chain trusted: until then the URL and the thumbprint are only what the presenter chose.
+    /// </summary>
+    public void Remember(IssuerKeyResolution resolution)
+    {
+        if (resolution.FetchedX5u is { } resource)
+        {
+            _certificates?.Remember(resource);
+        }
+    }
+
+    // SPEC: RFC 7515 section 4.1.8, x5t#S256 is "a base64url-encoded SHA-256 thumbprint ... of the DER encoding of
+    // the X.509 certificate ... corresponding to the key used to digitally sign the JWS".
+    private static byte[]? ReadX5tS256(JsonElement header)
+    {
+        if (!header.TryGetProperty("x5t#S256", out var x5t))
+        {
+            return null;
+        }
+
+        try
+        {
+            var hash = x5t.ValueKind == JsonValueKind.String ? Base64UrlEncoder.DecodeBytes(x5t.GetString()!) : null;
+            return hash is { Length: SHA256.HashSizeInBytes }
+                ? hash
+                : throw new FormatException("not 32 bytes");
+        }
+        catch (FormatException)
+        {
+            throw new SdJwtProcessingException(
+                ErrorCodes.IssuerKeyUnresolvable, "The x5t#S256 header is not a base64url SHA-256 thumbprint.");
+        }
+    }
+
+    // When both are present they must agree: x5t#S256 names the signing certificate, whichever header carries it.
+    private static void RequireThumbprintMatch(byte[] certificate, byte[]? thumbprint)
+    {
+        if (thumbprint is not null && !CryptographicOperations.FixedTimeEquals(SHA256.HashData(certificate), thumbprint))
+        {
+            throw new SdJwtProcessingException(
+                ErrorCodes.IssuerKeyUnresolvable, "The signing certificate does not match the x5t#S256 thumbprint.");
+        }
+    }
+
+    private static string ReadX5u(JsonElement header) =>
+        header.GetProperty("x5u") is { ValueKind: JsonValueKind.String } x5u
+            ? x5u.GetString()!
+            : throw new SdJwtProcessingException(ErrorCodes.IssuerKeyUnresolvable, "The x5u header is not a string.");
+
+    private static List<X509Certificate2>? ReadX5cHeader(JsonElement header)
     {
         // SPEC: RFC 7515 §4.1.6 — x5c is an array of base64 (standard, NOT base64url) DER certificates,
         // the first entry being the end-entity (signing) certificate. Parsed strictly, so a header naming x5c twice
         // has no chain to pick; the handler has already decoded it, so only StrictJson's own rules can refuse it.
-        using var header = ParseHeader(issuerJwt.EncodedHeader);
-        if (!header.RootElement.TryGetProperty("x5c", out var x5c))
+        if (!header.TryGetProperty("x5c", out var x5c))
         {
             return null;
         }

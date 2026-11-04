@@ -47,6 +47,25 @@ public sealed class MdocVerifierOptions
     public TimeSpan StatusListCacheDuration { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>
+    /// Fetches the Document Signer certificate an issuerAuth names by <c>x5u</c> when it carries no
+    /// <c>x5chain</c>. Off by default: such an mdoc then fails with <see cref="MdocErrorCodes.IssuerKeyUnresolvable"/>,
+    /// with a message saying x5u resolution is off.
+    /// </summary>
+    /// <remarks>
+    /// The fetch goes to a URL the presented mdoc chooses, and it happens before trust is known, because the
+    /// trust seam judges the chain the URL returns. It is HTTPS only and bounded in size and time; the default HTTP
+    /// client also refuses internal addresses, which a client passed to <see cref="MdocVerifier"/> must do itself.
+    /// Both the <c>x5u</c> and a SHA-256 <c>x5t</c> naming the certificate must be in the protected header, as CIR
+    /// (EU) 2026/1731 Annex I has a PID carry them; otherwise the mdoc is refused. A resource is kept only for an mdoc
+    /// that verified in full, keyed by URL and thumbprint, and reused for an hour from when it was fetched. The issuer
+    /// whose URL it is learns when its credentials are verified, so turn this on only for a trust source whose issuers
+    /// name their certificate this way.
+    /// </remarks>
+    // SPEC: CIR (EU) 2026/1731 Annex I, replacing the annex of CIR (EU) 2024/2977, has a PID's issuerAuth carry
+    // x5u and x5t (RFC 9360). ISO/IEC 18013-5 section 9.3.1 has issuers carry x5chain, so most mdocs need no fetch.
+    public bool ResolveX5u { get; set; }
+
+    /// <summary>
     /// Checks the proofs of zero knowledge presentations. Off by default: without one, a response made only of
     /// zero knowledge presentations fails with <see cref="MdocErrorCodes.ZkPresentationUnsupported"/>. With one,
     /// such a presentation is verified. Its timestamp must then lie within <see cref="ClockSkew"/> of the

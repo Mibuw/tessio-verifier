@@ -33,7 +33,8 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
     /// <param name="trustListResolver">Trust seam deciding whether the issuer is trusted.</param>
     /// <param name="options">Policy options; defaults are HAIP-aligned.</param>
     /// <param name="httpClient">
-    /// HTTP client for JWT VC Issuer Metadata, issuer key sets and status lists. Every fetch, on any
+    /// HTTP client for JWT VC Issuer Metadata, issuer key sets, status lists, and the signing certificate an
+    /// issuer JWT names by <c>x5u</c> when <see cref="SdJwtVcVerifierOptions.ResolveX5u"/> is on. Every fetch, on any
     /// client, has a deadline and a size limit. When null, a shared default also refuses non-public
     /// addresses and redirects, and ignores the process proxy. A client supplied here gets none of those
     /// three, so it must enforce them itself.
@@ -48,7 +49,9 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
         ArgumentNullException.ThrowIfNull(trustListResolver);
         _trustListResolver = trustListResolver;
         _options = options ?? new SdJwtVcVerifierOptions();
-        _keyResolver = new IssuerKeyResolver(httpClient ?? DefaultHttpClient);
+        _keyResolver = new IssuerKeyResolver(
+            httpClient ?? DefaultHttpClient,
+            _options.ResolveX5u ? new CertificateUrlFetcher(httpClient ?? DefaultHttpClient, clock ?? TimeProvider.System) : null);
         _clock = clock ?? TimeProvider.System;
         // The SAME trust seam the credential's own chain goes through. A status list token is a signed
         // statement about this credential's validity, so it deserves the deployment's trust rules rather
@@ -151,13 +154,16 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
                 ErrorCodes.AlgorithmNotAllowed, $"Issuer JWT algorithm '{issuerJwt.Alg}' is not permitted.");
         }
 
-        // 5. The issuer, from the credential alone (x5c chain, or iss for JWT VC Issuer Metadata).
-        var identified = IssuerKeyResolver.Identify(issuerJwt);
+        // 5. The issuer, from the credential alone (x5c chain, x5u with its x5t#S256, or iss for JWT VC Issuer Metadata).
+        var identified = _keyResolver.Identify(issuerJwt);
 
         // 6. On the metadata route, issuer trust BEFORE the key is fetched. The key lives on the host
         // the credential names, so only an issuer the deployment trusts has it requested. The seam is
         // asked with iss and an empty chain, which it can answer from its own configuration. On the x5c
         // route the key is already in hand, so trust is asked below, after the checks that need no fetch.
+        // An x5u is fetched below before trust is known, because trust on the X.509 route is judged on the
+        // chain it returns. Its fetch has the same bounds as every other, and the same address check on the
+        // default client.
         IssuerTrustStatus? trust = null;
         VerificationError? trustFailure = null;
         if (identified.Method == SdJwtConstants.KeyResolutionMetadata)
@@ -243,9 +249,14 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
         // CredentialType on BOTH branches. The failing one is the more useful of the two: a caller
         // looking at a vct mismatch wants to know what actually arrived, and every earlier return in
         // this method leaves it null because the payload had not been read yet.
-        return errors.Count > 0
-            ? Invalid(errors, issuerInfo) with { CredentialType = credentialType }
-            : new VerificationResult
+        if (errors.Count > 0)
+        {
+            return Invalid(errors, issuerInfo) with { CredentialType = credentialType };
+        }
+
+        // Verified in full, its chain trusted: only now is an x5u resource worth keeping.
+        _keyResolver.Remember(resolution);
+        return new VerificationResult
             {
                 IsValid = true,
                 DisclosedClaims = ExtractClaims(processed),
