@@ -596,6 +596,45 @@ public class StatusListTests
         Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("not a number", StringComparison.Ordinal));
     }
 
+    public static TheoryData<string> RepeatedMembers => ["bits", "status_list"];
+
+    [Theory]
+    [MemberData(nameof(RepeatedMembers))]
+    public async Task AStatusListTokenRepeatingAMember_IsRefused(string member)
+    {
+        // RFC 8259 §4: parsers disagree on a repeated name, so a token carrying two bits or two status_list
+        // claims has no single meaning. It is parsed as the issuer-signed payload is, and refused.
+        using var builder = CredentialWithStatus(idx: 0);
+        var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], rewritePayloadJson: json => member switch
+        {
+            "bits" => json.Replace("\"bits\":1", "\"bits\":8,\"bits\":1", StringComparison.Ordinal),
+            _ => "{\"status_list\":{\"bits\":1,\"lst\":\"eNoDAAAAAAE\"}," + json[1..],
+        });
+        var (verifier, _) = VerifierFor(builder, token);
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("payload is not JSON", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AStatusListTokenWithContentAfterItsJson_IsAStatusFailure_NotAThrow()
+    {
+        // The JWT handler accepts a payload with something after its one JSON value. Read by a parser that refuses
+        // it with an exception, it used to throw out of VerifyAsync; it is now an answer like any other bad token.
+        using var builder = CredentialWithStatus(idx: 0);
+        var token = builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], rewritePayloadJson: json => json + "x");
+        var (verifier, _) = VerifierFor(builder, token);
+
+        var result = await verifier.VerifyAsync(
+            new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() }, Context());
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == "status_invalid" && e.Message.Contains("payload is not JSON", StringComparison.Ordinal));
+    }
+
     public static TheoryData<string> MisshapenStatusLists => ["bits as a string", "status_list as a string"];
 
     [Theory]

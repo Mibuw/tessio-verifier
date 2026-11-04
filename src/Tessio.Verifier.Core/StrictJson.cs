@@ -21,6 +21,13 @@ internal static class StrictJson
         return JsonNode.Parse(utf8);
     }
 
+    /// <summary>The same rules, for a caller that reads <see cref="JsonElement"/>s. The caller disposes it.</summary>
+    public static JsonDocument ParseDocument(byte[] utf8)
+    {
+        Check(utf8);
+        return JsonDocument.Parse(utf8);
+    }
+
     private static void Check(byte[] utf8)
     {
         var reader = new Utf8JsonReader(utf8);

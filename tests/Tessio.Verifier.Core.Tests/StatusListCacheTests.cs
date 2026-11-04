@@ -58,19 +58,35 @@ public class StatusListCacheTests
         Assert.Equal(2, StatusFetches(http));
     }
 
-    [Theory]
-    [InlineData("1e-400")] // positive, though a double reads it as 0: caches nothing
-    [InlineData("1e400")] // a valid number, though a double reads it as infinity: saturates
-    public async Task ATtlPastWhatADoubleHolds_IsStillAPositiveNumber(string ttl)
+    [Fact]
+    public async Task ATtlBelowWhatADoubleResolves_IsStillAPositiveNumber()
     {
+        // 1e-400 is positive, though a double reads it as 0: it caches nothing, and the list still answers.
         var builder = new TestCredentialBuilder { Status = (0, StatusUri) };
         var (verifier, _) = VerifierFor(
-            builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], ttl: RawNumber(ttl)));
+            builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], ttl: RawNumber("1e-400")));
         var credential = new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() };
 
         var result = await verifier.VerifyAsync(credential, Context(), CancellationToken.None);
 
         Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Code}: {e.Message}")));
+    }
+
+    [Fact]
+    public async Task ATtlPastWhatADoubleHolds_IsRefused_AsAnyNumberPastADoubleIs()
+    {
+        // The status list token is parsed by StrictJson, as the issuer-signed payload is, so a number a double reads
+        // as infinity is refused here too, in any claim. It used to be read as a ttl that shortens nothing.
+        var builder = new TestCredentialBuilder { Status = (0, StatusUri) };
+        var (verifier, _) = VerifierFor(
+            builder, builder.BuildStatusListToken(StatusUri, bits: 1, statuses: [0], ttl: RawNumber("1e400")));
+        var credential = new PresentedCredential { Format = "dc+sd-jwt", RawValue = builder.Build() };
+
+        var result = await verifier.VerifyAsync(credential, Context(), CancellationToken.None);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.StatusInvalid
+                                            && e.Message.Contains("payload is not JSON", StringComparison.Ordinal));
     }
 
     private static int StatusFetches(FakeHttpHandler http) =>

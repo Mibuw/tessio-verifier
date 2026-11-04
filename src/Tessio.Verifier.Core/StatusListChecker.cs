@@ -269,7 +269,13 @@ internal sealed class StatusListChecker
         // Read from the JSON itself rather than from the handler's claims, which turn a string "300.5" and the
         // number 300.5 into the same text: §5.1 says what JSON type each claim is, and §8.3 step 4 says "All
         // existing claims in the Status List Token MUST be checked according to the rules in Section 5.1".
-        using var payloadDoc = JsonDocument.Parse(Base64UrlEncoder.Decode(token.EncodedPayload));
+        // Parsed as the issuer-signed payload is, so a repeated status_list or bits has no meaning to pick.
+        using var payloadDoc = ParseStrict(token.EncodedPayload);
+        if (payloadDoc is null)
+        {
+            return [Error(ErrorCodes.StatusInvalid, $"The status list token payload is not JSON with {StrictJson.Accepts}.")];
+        }
+
         var claims = payloadDoc.RootElement;
 
         // SPEC: §5.1 — iat is REQUIRED, and §8.3 step 3b says to "Check for the existence of the required claims".
@@ -371,7 +377,8 @@ internal sealed class StatusListChecker
     /// <summary>
     /// The whole seconds of a ttl that is a positive JSON number. The sign and zero are read from the number's
     /// own text, because a double cannot hold every number JSON can write: 1e-400 is positive but reads as 0,
-    /// and 1e400 is a valid number that reads as infinity. The first caches nothing, the second saturates.
+    /// so it caches nothing. A number past what a double holds, such as 1e400, never gets here, because
+    /// <see cref="StrictJson"/> refuses the token first; the infinity branch reads one as the longest time.
     /// </summary>
     private static bool TryReadPositiveSeconds(JsonElement value, out long seconds)
     {
@@ -391,6 +398,21 @@ internal sealed class StatusListChecker
         var parsed = value.TryGetDouble(out var d) ? d : double.PositiveInfinity;
         seconds = !double.IsFinite(parsed) || parsed >= long.MaxValue ? long.MaxValue : (long)Math.Floor(parsed);
         return true;
+    }
+
+    // Null for a payload StrictJson refuses, trailing content after the JSON value included. The JsonWebToken
+    // constructor has already decoded this segment, so a FormatException is not expected; it is caught anyway,
+    // so that a decoder disagreement answers status_invalid rather than escaping the status check.
+    private static JsonDocument? ParseStrict(string encodedPayload)
+    {
+        try
+        {
+            return StrictJson.ParseDocument(Base64UrlEncoder.DecodeBytes(encodedPayload));
+        }
+        catch (Exception e) when (e is JsonException or FormatException)
+        {
+            return null;
+        }
     }
 
     private static VerificationError Error(string code, string message) => new() { Code = code, Message = message };

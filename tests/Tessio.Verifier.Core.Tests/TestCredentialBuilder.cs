@@ -274,12 +274,13 @@ internal sealed class TestCredentialBuilder : IDisposable
     /// so a suite with no x5c status token says nothing about the anchoring path. Added 2026-09-20
     /// after review found that gap.
     /// <c>statusList</c> replaces the <c>status_list</c> claim, given the encoded <c>lst</c>, for a claim of
-    /// the wrong JSON shape.
+    /// the wrong JSON shape. <c>rewritePayloadJson</c> edits the serialized payload before signing, for JSON a
+    /// dictionary cannot hold, such as a repeated member.
     /// </remarks>
     public string BuildStatusListToken(
         string uri, int bits, byte[] statuses, object? exp = null, string typ = "statuslist+jwt", string? sub = null,
         object? ttl = null, X509Certificate2? signWith = null, bool includeIat = true, object? nbf = null, object? iat = null,
-        Func<string, object>? statusList = null)
+        Func<string, object>? statusList = null, Func<string, string>? rewritePayloadJson = null)
     {
         var packed = new byte[(statuses.Length * bits + 7) / 8];
         for (var i = 0; i < statuses.Length; i++)
@@ -329,6 +330,7 @@ internal sealed class TestCredentialBuilder : IDisposable
         }
 
         var payload = JsonSerializer.Serialize(claims);
+        payload = rewritePayloadJson?.Invoke(payload) ?? payload;
 
         if (signWith is null)
         {
