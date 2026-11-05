@@ -85,9 +85,9 @@ internal sealed class RequestObjectSigner
         // value oauth-authz-req+jwt".
         var headers = new Dictionary<string, object> { ["typ"] = "oauth-authz-req+jwt" };
 
-        // SPEC: ETSI TS 119 472-2 V1.3.1 §6.4.2 OIDFVP-HAIP-REDIRECTS_RO-03 — "The JWS Protected Header of
-        // the JWS signature on the RO shall incorporate the iat header parameter." Same instant as the
-        // payload's iat, so the two cannot disagree.
+        // SPEC: ETSI TS 119 472-2 V1.2.1 (2026-03) §6.4.2 OIDFVP-HAIP-REDIRECTS_RO-03, which CIR (EU) 2026/1731
+        // applies and does not adapt: "The JWS Protected Header of the JWS signature on the RO shall incorporate
+        // the iat header parameter." Same instant as the payload's iat, so the two cannot disagree.
         headers["iat"] = issuedAt.ToUnixTimeSeconds();
 
         // Required in practice: a wallet using the x509_san_dns client_id scheme has no other way to

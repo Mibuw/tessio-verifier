@@ -21,8 +21,9 @@ namespace Tessio.Verifier.Core;
 /// reader certificate holds the signing key is the caller's to check, because only the caller knows the
 /// key's type.
 /// </remarks>
-// SPEC: ETSI TS 119 472-2 V1.3.1 (V1.2.1 has the same text) clause 6.4.2 OIDFVP-HAIP-REDIRECTS_RO-02
-// (a JAR's x5c, redirect transport) and clause 5.3.2 ISO/IEC 18013-REQ-03 (mdoc's x5chain) both say the RP access certificate "in its first element,
+// SPEC: ETSI TS 119 472-2 V1.2.1 (2026-03), which CIR (EU) 2026/1731 applies with adaptations. Clause 6.4.2
+// OIDFVP-HAIP-REDIRECTS_RO-02 (a JAR's x5c, redirect transport), which the regulation does not adapt, and clause
+// 5.3.2 ISO/IEC 18013-REQ-03 (mdoc's x5chain) both say the RP access certificate "in its first element,
 // and its certificate path up to, but excluding, the trust anchor". OpenID4VC HAIP 1.0 section 5: "The
 // X.509 certificate of the trust anchor MUST NOT be included in the x5c JOSE header of the signed
 // request. The X.509 certificate signing the request MUST NOT be self-signed."

@@ -21,7 +21,8 @@ public sealed class PresentationRequestBuilderOptions
     /// OpenID4VP 1.0 section 5.9.3 requires x5c for the <c>x509_san_dns</c> and <c>x509_hash</c> client
     /// identifier prefixes: the wallet matches the client identifier against the leaf it carries and has
     /// no other way to obtain it. HAIP 1.0 section 5 requires <c>x509_hash</c> for signed requests, and
-    /// for a request sent by redirect ETSI TS 119 472-2 OIDFVP-HAIP-REDIRECTS_RO-01 requires x5c outright.
+    /// for a request sent by redirect ETSI TS 119 472-2 V1.2.1 OIDFVP-HAIP-REDIRECTS_RO-01, which CIR (EU) 2026/1731
+    /// applies and does not adapt, requires x5c outright.
     /// When null, requests carry no x5c, so they cannot use either x509 prefix. An empty list is refused
     /// rather than read as null.
     /// <para>
