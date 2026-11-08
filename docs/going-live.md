@@ -117,6 +117,172 @@ holder having nothing to offer. An id outside §6.3's alphanumeric, underscore a
 claims sharing an id; a set naming a claim that is absent; and a claim
 that no set names, which §6.4.1 means would never be requested at all.
 
+### Accepting a credential in either format
+
+A holder may have the PID as an ISO mdoc, as an SD-JWT VC or both. Asking for one format turns away
+everyone who holds only the other. Handing a wallet two requests in one Digital Credentials API call does
+not help either, because some wallets answer only one of them. OpenID4VP 1.0 puts the alternatives inside
+one DCQL query instead: a `credential_sets` entry whose options name several Credential Queries, each with
+an id of its own. `Dcql.AnyOf` builds that for the common case:
+
+```csharp
+DcqlQueryJson = Dcql.AnyOf(
+    DcqlCredentialQuery.Mdoc("pid_mdoc", "eu.europa.ec.eudi.pid.1",
+        [new DcqlClaim { Path = ["eu.europa.ec.eudi.pid.1", "birth_date"] }]),
+    DcqlCredentialQuery.SdJwtVc("pid_sd_jwt", ["urn:eudi:pid:1"],
+        [new DcqlClaim { Path = ["birthdate"] }])),
+ClientMetadataJson = ClientMetadata.BuildForFormats(["mso_mdoc", "dc+sd-jwt"], responseEncryptionJwk),
+```
+
+§6.2 defines each option as "a list of Credential Query identifiers representing one set of Credentials
+that satisfies the use case", and §6.4.2 has the wallet "return presentations of a set of Credentials that
+match to one of the options inside the Credential Set Query". The specification gives the order of the
+options no meaning: it states a preference order only for `claim_sets` (§6.4.1), and §6.4.3 expects the
+wallet to let its user choose when several options can be satisfied. `Dcql.Query` takes any number of
+`DcqlCredentialSet` entries for the other shapes, such as an option demanding two credentials together or a
+set marked `Required = false`, which §6.2 defaults to true. With no sets at all, §6.4.2 requests every
+Credential Query. `client_metadata` has to advertise both formats, which `ClientMetadata.BuildForFormats`
+does. `ClientMetadata.Build` advertises one.
+
+The answer comes back keyed by Credential Query id (§8.1), and `WalletResponseVerifier` reads each
+presentation in the format of the entry its key names, checked against that entry's type. The same holds on
+every path: `VerifyAsync`, the callback `MapTessioVerifier` maps and `VerifyDcApiAsync` for signed and
+unsigned requests. The result carries `VerificationResult.CredentialQueryId`, so you can record which
+alternative the holder presented. When a wallet answers several, the result is the verified presentation whose
+entry comes first in the query's `credentials` array. The order of the wallet's `vp_token` keys does not change
+it. `VerificationResult.VerifiedPresentations` lists every presentation that verified, in the same order and
+each with its own id, claims and issuer, so an option that needs two credentials together has both sets of
+claims within reach. A response is refused as `response_invalid` when:
+
+- a key names no Credential Query;
+- an entry that does not allow `multiple` gets more than one presentation (§8.1);
+- the Credential Queries answered are not a combination the query asked for (§6.4.2): no option of a
+  required set is complete, or a presentation sits outside every option it completes. That second half is
+  this verifier's reading rather than a sentence of the specification.
+
+A presentation under the wrong key fails too, because the format follows the key and is never guessed from
+the presentation.
+
+A presentation that fails its own checks (signature, nonce, type and the rest) is set aside rather than
+failing the response outright. §8.6: "If any of the checks related to an individual Presentation fail, the
+effected Presentation MUST be discarded." The selection rules are then asked again of what verified. If that
+still completes an option of every required set, the response verifies; a wallet that sent both
+alternatives, one of them stale, is answered by the other. If it does not, the response is refused with the
+first failure, so the error codes say why a presentation was set aside. A query with no credential sets
+requests every entry, so there a failure refuses the response unless another presentation under the same key
+verified, which an entry setting `multiple` allows.
+
+Transaction data is bound to entries, not to the response. §5.1 gives each transaction data object
+`credential_ids`, "each referencing a Credential requested by the Verifier that can be used to authorize this
+transaction", and §8.4 has the wallet put the acknowledgement "in the respective Credential presentation". So
+every object must be acknowledged by a presentation that verified and answers one of the entries it names, or
+the response is refused as `transaction_data_missing`, even when other entries satisfy every set. Only an
+SD-JWT VC presentation counts: its Key Binding JWT carries the hashes, which `SdJwtVcVerifier` checks. Each
+SD-JWT VC answer is checked against exactly the objects whose `credential_ids` name its entry, so an entry
+that no object names carries no hashes and is not refused for it. This library checks no transaction data in
+an mdoc. A request whose transaction data names an mdoc entry or an entry the query lacks fails
+`WalletResponseVerifier.CanVerify`, so `VerifyDcApiAsync` refuses it as `request_unverifiable` and the
+callback with its not verifiable outcome. Through `VerifyAsync` it is refused as `transaction_data_missing`
+instead, because no mdoc answer can acknowledge it.
+
+One shape of transaction data cannot be checked, and is refused as this library's limit. §5.1, on
+`credential_ids`: "If there is more than one element in the array, the Wallet MUST use only one of the
+referenced Credentials for transaction authorization." Which one the wallet chose cannot be told, and each
+SD-JWT VC answer is checked against every object naming its entry. Where an object names alternatives, such
+as the two entries of `Dcql.AnyOf`, an answer needs only one of them and that one carries it. Where it names
+two entries an answer may need together (both in one option, in options of different sets, or any two
+entries of a query without credential sets), the one the wallet did not choose would fail and a valid answer
+would be refused. So such a request fails `CanVerify` and `VerifyAsync` refuses it as `request_unverifiable`.
+
+A known interop edge: B.3.3.1 says of `transaction_data_hashes` that "Each of these hashes is calculated
+using a hash function over the string received in the transaction_data request parameter" and that "Each
+hash value ensures the integrity of, and maps to, the respective transaction data object". This library reads
+that as the objects meant for that presentation. A wallet that hashes every transaction data string into
+every Key Binding JWT of a query asking for several credentials fails the exact match for an entry that not
+every object names. That is kept strict. A query with a single entry is unaffected, because every object
+names it.
+
+The verifier does not check that a presentation carries the claims its entry asked for. §8.6 asks a
+verifier to "Validate that the returned Credential(s) meet all criteria defined in the query". That part is
+left to you: read the claims you need from the result and treat one that is missing as a refusal.
+So a verified presentation missing a requested claim can still satisfy a set. This predates credential
+sets and is not changed by them.
+
+If you parse responses yourself, set `WalletResponseParserOptions.DcqlQueryJson` to the query you sent and
+the parser applies the same key and selection rules; it cannot verify, so it does not set anything aside.
+The parser's constructor refuses a query it cannot read. Leave the option unset and every presentation is
+read in `PresentationFormat`, as before. `PresentedCredential.CredentialQueryId` carries the key either way,
+and a key with no presentation under it is refused either way.
+
+The builders refuse at build time what would otherwise fail silently at the wallet: two Credential Queries
+sharing an id or one outside §6.1's character set, an empty set or option and an option naming an id no
+entry carries. They also refuse an entry no option names. That last one is this library's rule, read from
+§6.4.2 rather than stated there: with sets present the entry would never be requested.
+
+A stored request whose query asks for several credentials but whose answers cannot each be matched to an
+entry that states its format and type (missing or repeated ids, an entry with no `format`, an entry with no
+`doctype_value` or `vct_values`) fails `WalletResponseVerifier.CanVerify`. `VerifyDcApiAsync` and the callback
+refuse it before verifying the answer: `request_unverifiable` from the first, the not verifiable outcome from
+the callback. `VerifyAsync` does not call `CanVerify` for
+you, so it makes the same refusal at the point each answer's type would be read: an answer is never checked
+against an entry that states no type for the format it is read in, because a missing type skips the
+comparison rather than failing it.
+
+#### Upgrading: what changes for a single credential query
+
+These apply to requests verified by `WalletResponseVerifier`, not only to queries built with `Dcql.AnyOf`,
+whenever the query's ids can be read: each entry with a well-formed id of its own, a readable `multiple` and,
+for a query asking for several credentials, a `format`. A query with a single entry that falls short of that
+keeps the earlier path, every answer read in one format and checked against that entry. The empty key refusal
+below is the parser's and applies to every response.
+
+- A `vp_token` key that is not the id of a Credential Query in the request is refused (§8.1). Before, every
+  key was read whatever its name.
+- More than one presentation under one key is refused unless the entry sets `multiple` (§8.1: "When multiple
+  is omitted, or set to false, the array MUST contain only one Presentation").
+- A key with no presentation under it, an empty array or one holding only empty arrays, is refused beside
+  other answers too, by `WalletResponseParser` whether or not it was given a query (§8.1: the value is "an
+  array of one or more Presentations", and an optional Credential Query with no matching Credentials has no
+  entry at all). Before, it was read as no presentation for that key.
+- A presentation that fails its own checks is discarded (§8.6) rather than failing the response at once. With
+  `multiple` set and no credential sets, one failing presentation beside one that verifies under the same key
+  is now accepted, where it used to be refused. With no credential sets and no `multiple`, any failure still
+  refuses the response.
+- With transaction data, every object must be acknowledged by a verified SD-JWT VC presentation answering one
+  of its `credential_ids`. An object naming an mdoc entry or an id the query lacks fails `CanVerify`
+  and through `VerifyAsync` is refused as `transaction_data_missing`. Transaction data whose `credential_ids`
+  cannot be read fails `CanVerify` and through `VerifyAsync` is `request_unverifiable`; v0.29.0 verified it.
+  Before, every SD-JWT VC presentation was checked against all the transaction data, whatever its
+  `credential_ids` named.
+- **A host with `CredentialFormat = "mso_mdoc"` and `TransactionData` set now fails `CanVerify` on every
+  session.** `DemoRequestOptionsFactory` gives each object `credential_ids` of `["credential"]`, which names the
+  mdoc entry, and this library checks no transaction data in an mdoc. v0.29.0 verified the mdoc and silently
+  ignored the transaction data, so the binding the request asked for was never checked. That fails closed now.
+  Drop the transaction data or request an SD-JWT VC.
+- A passing result carries `VerifiedPresentations`, and its top-level members are those of the verified
+  presentation whose entry comes first in the query, not of the first in the `vp_token`.
+- `SdJwtVcVerifier` refuses a credential whose disclosed claims nest arrays or objects more than 32 levels
+  deep, as `structure_invalid`, the bound mdoc element values already had. Recursive disclosures (RFC 9901
+  §7.1) let a claim nest deeper than any one JSON text is parsed at, and once a result sits inside
+  `VerifiedPresentations` a claim near that depth would no longer serialize in the session view.
+- **The anonymous session status endpoint and its event stream now carry every verified presentation's
+  disclosed claims**, in `VerifiedPresentations`, not only the first's. Each nested result is narrowed like the
+  top-level one (trust list source, error messages), but its claims are shown. That widens what reaches whoever
+  holds the session id when a wallet answers more than one Credential Query.
+- An answer is read in the `format` of the Credential Query its key names, which overrides the parser's
+  `PresentationFormat`. The callback's parser, configured from `VerifierOptions.CredentialFormat`, no longer
+  decides the format of a session whose query names another.
+- `PresentedCredential.CredentialQueryId` is set by the parser whenever the `vp_token` is keyed, and
+  `VerificationResult.CredentialQueryId` and, on a pass, `VerificationResult.VerifiedPresentations` by the
+  verifier whenever the query's ids are readable. These are records, so a value that used to compare equal to
+  one built without them no longer does, and a serializer writing all properties writes the new ones.
+- A single credential query that carries a malformed `credential_sets` is now `request_unverifiable`.
+- Through `VerifyAsync`, an entry with readable ids that states no type for the format its answer is read in
+  is now `request_unverifiable`. Before, the type comparison was skipped.
+- A hand-written query asking for several credentials is now judged per §6.4.2 and per answered entry: each
+  answer in its own entry's format and against its own entry's type. Before, every answer was read in one
+  format (the first entry's, or in the callback the process's) and checked against the first entry's type.
+
 ### Asking only for credentials from issuers you trust
 
 A wallet holding several credentials of the requested type cannot tell which issuers you accept. `Dcql.WithTrustedAuthorities` adds a Trusted Authorities Query of type `aki` to every credential in a query, built from the certificates your trust list names for those issuers:

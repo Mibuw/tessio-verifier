@@ -246,6 +246,20 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
             errors.Add(trustFailure ?? Untrusted(trust, resolution.Issuer));
         }
 
+        // A claim nested deeper than the result's readers can carry is refused rather than returned. Recursive
+        // disclosures (RFC 9901 section 7.1) let one disclosure's value hold another's, so the depth of a disclosed
+        // value is not bounded by the depth any one JSON text is parsed at, and a value deep enough fails whatever
+        // later serializes the result, such as a session status page. The bound is the one mdoc element values
+        // already have (CborValueConverter), far beyond any credential type in use.
+        if (JsonValueConverter.DeeperThanAllowed(processed))
+        {
+            errors.Add(new VerificationError
+            {
+                Code = ErrorCodes.StructureInvalid,
+                Message = $"A disclosed claim nests deeper than {JsonValueConverter.MaxDepth} levels.",
+            });
+        }
+
         // CredentialType on BOTH branches. The failing one is the more useful of the two: a caller
         // looking at a vct mismatch wants to know what actually arrived, and every earlier return in
         // this method leaves it null because the payload had not been read yet.

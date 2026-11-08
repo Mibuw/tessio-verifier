@@ -18,16 +18,20 @@ namespace Tessio.Verifier.OpenId4Vp;
 /// This used to tell callers to hand-write the JSON for a nested path or a claim set. A builder that
 /// covers only the easy shape does not prevent the hard one, it only decides where the hard one gets
 /// written: in a caller, where the path the query asks for sits apart from the code that reads the
-/// answer back, and nothing compares the two. Still hand-written, because nothing asks for them yet:
-/// claim value constraints, and more than one credential in a single query.
+/// answer back, and nothing compares the two. Still hand-written, because nothing asks for it yet:
+/// claim value constraints.
+/// </para>
+/// <para>
+/// Several Credential Queries in one query, offered as alternatives or required together, are built by
+/// <see cref="Query"/> and <see cref="AnyOf"/> from <see cref="DcqlCredentialQuery"/> entries.
 /// </para>
 /// </remarks>
 // SPEC: OpenID4VP 1.0 uses DCQL, not Presentation Exchange.
 public static partial class Dcql
 {
     // SPEC: SD-JWT VC credential format identifier is "dc+sd-jwt" (not the legacy "vc+sd-jwt").
-    private const string SdJwtVcFormat = "dc+sd-jwt";
-    private const string MdocFormat = "mso_mdoc";
+    internal const string SdJwtVcFormat = "dc+sd-jwt";
+    internal const string MdocFormat = "mso_mdoc";
 
     /// <summary>The credential id this builder puts on a single-credential query.</summary>
     /// <remarks>
@@ -94,6 +98,18 @@ public static partial class Dcql
         IReadOnlyList<DcqlClaim> claims,
         string[][] claimSets,
         bool allowEmptyClaims)
+        => SingleCredential(SdJwtVcCredential(DefaultCredentialId, vctValues, claims, claimSets, allowEmptyClaims));
+
+    /// <summary>
+    /// One SD-JWT VC Credential Query object, validated. The single-credential builders and
+    /// <see cref="DcqlCredentialQuery.SdJwtVc"/> share it, so a Credential Query is written one way.
+    /// </summary>
+    internal static JsonObject SdJwtVcCredential(
+        string id,
+        IReadOnlyList<string> vctValues,
+        IReadOnlyList<DcqlClaim> claims,
+        string[][] claimSets,
+        bool allowEmptyClaims)
     {
         ArgumentNullException.ThrowIfNull(vctValues);
         if (vctValues.Count == 0)
@@ -108,7 +124,8 @@ public static partial class Dcql
             values.Add(vct);
         }
 
-        return SingleCredential(
+        return CredentialObject(
+            id,
             SdJwtVcFormat,
             new JsonObject { ["vct_values"] = values },
             DcqlClaimsQuery.ClaimsArray(claims, claimSets, isMdoc: false, allowEmptyClaims),
@@ -136,10 +153,19 @@ public static partial class Dcql
 
     private static string MdocQuery(
         string docType, IReadOnlyList<DcqlClaim> claims, string[][] claimSets, bool allowEmptyClaims)
+        => SingleCredential(MdocCredential(DefaultCredentialId, docType, claims, claimSets, allowEmptyClaims));
+
+    /// <summary>
+    /// One mdoc Credential Query object, validated. The single-credential builders and
+    /// <see cref="DcqlCredentialQuery.Mdoc"/> share it, so a Credential Query is written one way.
+    /// </summary>
+    internal static JsonObject MdocCredential(
+        string id, string docType, IReadOnlyList<DcqlClaim> claims, string[][] claimSets, bool allowEmptyClaims)
     {
         ArgumentException.ThrowIfNullOrEmpty(docType);
 
-        return SingleCredential(
+        return CredentialObject(
+            id,
             MdocFormat,
             new JsonObject { ["doctype_value"] = docType },
             DcqlClaimsQuery.ClaimsArray(claims, claimSets, isMdoc: true, allowEmptyClaims),
@@ -178,12 +204,29 @@ public static partial class Dcql
             allowEmptyClaims: true);
     }
 
-    private static string SingleCredential(
-        string format, JsonObject meta, JsonArray claims, JsonArray? claimSets = null)
+    private static string SingleCredential(JsonObject credential)
     {
+        var query = new JsonObject { ["credentials"] = new JsonArray(credential) };
+        return query.ToJsonString(JsonDefaults.Relaxed);
+    }
+
+    /// <summary>A Credential Query object, its members in the order every builder has always written them.</summary>
+    private static JsonObject CredentialObject(
+        string id, string format, JsonObject meta, JsonArray claims, JsonArray? claimSets)
+    {
+        // SPEC: OpenID4VP 1.0 section 6.1, id: "The value MUST be a non-empty string consisting of
+        // alphanumeric, underscore (_), or hyphen (-) characters."
+        if (!DcqlClaimsQuery.IsWellFormedId(id))
+        {
+            throw new ArgumentException(
+                $"'{id}' is not a usable Credential Query id. Only letters, digits, underscore and hyphen are "
+                + "allowed, and it cannot be empty (OpenID4VP 1.0 section 6.1).",
+                nameof(id));
+        }
+
         var credential = new JsonObject
         {
-            ["id"] = DefaultCredentialId,
+            ["id"] = id,
             ["format"] = format,
             ["meta"] = meta,
             ["claims"] = claims,
@@ -196,7 +239,6 @@ public static partial class Dcql
             credential["claim_sets"] = claimSets;
         }
 
-        var query = new JsonObject { ["credentials"] = new JsonArray(credential) };
-        return query.ToJsonString(JsonDefaults.Relaxed);
+        return credential;
     }
 }

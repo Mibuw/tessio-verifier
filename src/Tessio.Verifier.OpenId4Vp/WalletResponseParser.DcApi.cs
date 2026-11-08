@@ -35,6 +35,10 @@ public sealed partial class WalletResponseParser
     /// <exception cref="WalletResponseException">
     /// The object is malformed in any part its sender controls or cannot be decrypted.
     /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// <see cref="WalletResponseParserOptions.DcqlQueryJson"/> was changed after construction to something the parser
+    /// cannot read as a DCQL query.
+    /// </exception>
     // SPEC: OpenID4VP 1.0 Appendix A.4: "the OpenID4VP Response parameters as defined for the Response Type are
     // represented as an object within the data property", and Appendix A.2: "For Response Mode dc_api.jwt, the
     // Wallet includes the response parameter, which contains an encrypted JWT encapsulating the Authorization
@@ -43,6 +47,7 @@ public sealed partial class WalletResponseParser
     public async Task<ParsedWalletResponse> ParseDcApiAsync(string dataJson, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(dataJson);
+        var rules = AnswerRules();
 
         string? sealedResponse;
         using (var document = ParseResponseJson(dataJson, DcApiSource))
@@ -61,13 +66,13 @@ public sealed partial class WalletResponseParser
             var claims = await UnwrapResponseJwtAsync(sealedResponse).ConfigureAwait(false);
             return claims.Error is { } sealedError
                 ? new ParsedWalletResponse { Credentials = [], Error = sealedError, Encrypted = true }
-                : new ParsedWalletResponse { Credentials = ExtractCredentials(claims.VpTokenJson!), Encrypted = true };
+                : new ParsedWalletResponse { Credentials = ExtractCredentials(claims.VpTokenJson!, rules), Encrypted = true };
         }
 
         var cleartext = ExtractResponseClaims(dataJson, DcApiSource);
         return cleartext.Error is { } error
             ? new ParsedWalletResponse { Credentials = [], Error = error }
-            : new ParsedWalletResponse { Credentials = ExtractCredentials(cleartext.VpTokenJson!) };
+            : new ParsedWalletResponse { Credentials = ExtractCredentials(cleartext.VpTokenJson!, rules) };
     }
 
     /// <summary>What the messages call the object this transport returns.</summary>
