@@ -139,16 +139,18 @@ public sealed partial class WalletResponseVerifier
         // The origin carries no trailing slash, although A.4's example prints one. SPEC: OpenID4VP 1.0 Terminology,
         // Origin: "The web origin is https://verify.example.com".
         $"origin:{origin}",
-        () => RequestParameters.TryGetExpectedVctValues(request),
+        queryId => RequestParameters.TryGetExpectedVctValues(request, queryId),
         () => Expectations.TransactionDataOf(RequestParameters.TryGetTransactionData(request)),
-        () => new MdocVerificationContext
+        queryId => new MdocVerificationContext
         {
-            ExpectedDocType = RequestParameters.TryGetExpectedDocType(request),
+            ExpectedDocType = RequestParameters.TryGetExpectedDocType(request, queryId),
             // SPEC: OpenID4VP 1.0 Annex B.2.6.2: the transcript binds the origin, the nonce and, under
             // dc_api.jwt, the encryption key's thumbprint; under dc_api "the third element MUST be null".
             SessionTranscript = SessionTranscriptBuilder.BuildForDcApi(
                 origin,
                 request.Nonce,
                 encrypted ? RequestParameters.TryGetEncryptionKeyThumbprint(request) : null),
-        });
+        },
+        () => RequestParameters.TryGetAnswerRules(request),
+        () => RequestParameters.AsksForSeveralCredentials(request));
 }

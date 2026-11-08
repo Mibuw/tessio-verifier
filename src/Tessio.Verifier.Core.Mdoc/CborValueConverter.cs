@@ -12,9 +12,11 @@ internal static class CborValueConverter
 {
     /// <summary>
     /// How deeply arrays and maps may nest in one value. Recursion is bounded so that a hostile value cannot
-    /// overflow the stack; mdoc element values nest a few levels at most.
+    /// overflow the stack; mdoc element values nest a few levels at most. It is the bound disclosed SD-JWT claims
+    /// are held to (<see cref="Tessio.Verifier.Core.JsonValueConverter.MaxDepth"/>), so a result's claims share one
+    /// depth whichever format they came from.
     /// </summary>
-    internal const int MaxDepth = 32;
+    internal const int MaxDepth = Tessio.Verifier.Core.JsonValueConverter.MaxDepth;
 
     public static object? Read(CborReader reader) => Read(reader, 0);
 

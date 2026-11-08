@@ -68,6 +68,41 @@ internal static class RequestParameters
         return entries.Count > 0 ? entries : null;
     }
 
+    /// <summary>
+    /// The <c>credential_ids</c> of each transaction data object, in order, or null when any object cannot be read:
+    /// not base64url, not a JSON object, or without a non-empty array of non-empty strings there.
+    /// </summary>
+    // SPEC: OpenID4VP 1.0 section 5.1, transaction_data: "Non-empty array of strings, where each string is a
+    // base64url-encoded JSON object", whose credential_ids is "REQUIRED. Non-empty array of strings each referencing
+    // a Credential requested by the Verifier".
+    public static IReadOnlyList<IReadOnlyList<string>>? TransactionDataCredentialIds(IReadOnlyList<string> transactionData)
+    {
+        var all = new List<IReadOnlyList<string>>(transactionData.Count);
+        foreach (var entry in transactionData)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(Base64UrlEncoder.DecodeBytes(entry));
+                if (document.RootElement.ValueKind != JsonValueKind.Object
+                    || !document.RootElement.TryGetProperty("credential_ids", out var ids)
+                    || ids.ValueKind != JsonValueKind.Array
+                    || ids.GetArrayLength() == 0
+                    || !ids.EnumerateArray().All(IsTypeIdentifier))
+                {
+                    return null;
+                }
+
+                all.Add([.. ids.EnumerateArray().Select(static id => id.GetString()!)]);
+            }
+            catch (Exception e) when (e is FormatException or JsonException or ArgumentException)
+            {
+                return null;
+            }
+        }
+
+        return all;
+    }
+
     /// <summary>The request's <c>response_uri</c>, or null.</summary>
     public static string? TryGetResponseUri(PresentationRequest request) =>
         Read(request, root => TryGetString(root, "response_uri"));
@@ -124,17 +159,21 @@ internal static class RequestParameters
     /// criteria defined in the query". Reading <c>[0]</c> compares against one member of the allowed set
     /// rather than against the criterion the query states, so it refuses a credential the request
     /// permitted.
+    /// <para>
+    /// <paramref name="credentialQueryId"/> names the Credential Query whose types to read, for a query asking for
+    /// several; null reads the first, as before.
+    /// </para>
     /// </remarks>
-    public static IReadOnlyList<string>? TryGetExpectedVctValues(PresentationRequest request) =>
-        Read(request, ExpectedVctValuesOf);
+    public static IReadOnlyList<string>? TryGetExpectedVctValues(PresentationRequest request, string? credentialQueryId = null) =>
+        Read(request, root => ExpectedVctValuesOf(root, credentialQueryId));
 
-    /// <inheritdoc cref="TryGetExpectedVctValues(PresentationRequest)"/>
-    public static IReadOnlyList<string>? TryGetExpectedVctValues(DcApiPresentationRequest request) =>
-        Read(request, ExpectedVctValuesOf);
+    /// <inheritdoc cref="TryGetExpectedVctValues(PresentationRequest, string?)"/>
+    public static IReadOnlyList<string>? TryGetExpectedVctValues(DcApiPresentationRequest request, string? credentialQueryId = null) =>
+        Read(request, root => ExpectedVctValuesOf(root, credentialQueryId));
 
-    private static IReadOnlyList<string>? ExpectedVctValuesOf(JsonElement root)
+    private static List<string>? ExpectedVctValuesOf(JsonElement root, string? credentialQueryId)
     {
-        if (!TryGetFirstCredential(root, out var credential)
+        if (!TryGetCredential(root, credentialQueryId, out var credential)
             || !credential.TryGetProperty("meta", out var meta)
             || !meta.TryGetProperty("vct_values", out var vctValues)
             || vctValues.ValueKind != JsonValueKind.Array)
@@ -171,18 +210,33 @@ internal static class RequestParameters
     /// <summary>
     /// The requested mdoc document type from the request's DCQL query
     /// (<c>dcql_query.credentials[0].meta.doctype_value</c>), or null for a non-mdoc request.
+    /// <paramref name="credentialQueryId"/> names the Credential Query to read instead of the first.
     /// </summary>
-    public static string? TryGetExpectedDocType(PresentationRequest request) =>
-        Read(request, ExpectedDocTypeOf);
+    public static string? TryGetExpectedDocType(PresentationRequest request, string? credentialQueryId = null) =>
+        Read(request, root => ExpectedDocTypeOf(root, credentialQueryId));
 
-    /// <inheritdoc cref="TryGetExpectedDocType(PresentationRequest)"/>
-    public static string? TryGetExpectedDocType(DcApiPresentationRequest request) =>
-        Read(request, ExpectedDocTypeOf);
+    /// <inheritdoc cref="TryGetExpectedDocType(PresentationRequest, string?)"/>
+    public static string? TryGetExpectedDocType(DcApiPresentationRequest request, string? credentialQueryId = null) =>
+        Read(request, root => ExpectedDocTypeOf(root, credentialQueryId));
 
-    private static string? ExpectedDocTypeOf(JsonElement root) =>
-        TryGetFirstCredential(root, out var credential) && credential.TryGetProperty("meta", out var meta)
+    private static string? ExpectedDocTypeOf(JsonElement root, string? credentialQueryId) =>
+        TryGetCredential(root, credentialQueryId, out var credential) && credential.TryGetProperty("meta", out var meta)
             ? TryGetString(meta, "doctype_value")
             : null;
+
+    /// <summary>
+    /// What the request's DCQL query says about the <c>vp_token</c> that answers it, or null when the query cannot
+    /// be read that way (see <see cref="AreRecoverable(PresentationRequest)"/> for when that refuses the request).
+    /// </summary>
+    public static DcqlAnswerRules? TryGetAnswerRules(PresentationRequest request) =>
+        Read(request, AnswerRulesOf);
+
+    /// <inheritdoc cref="TryGetAnswerRules(PresentationRequest)"/>
+    public static DcqlAnswerRules? TryGetAnswerRules(DcApiPresentationRequest request) =>
+        Read(request, AnswerRulesOf);
+
+    private static DcqlAnswerRules? AnswerRulesOf(JsonElement root) =>
+        root.TryGetProperty("dcql_query", out var query) ? DcqlAnswerRules.TryRead(query) : null;
 
     /// <summary>
     /// The response-encryption public JWK this request advertised in <c>client_metadata.jwks</c>, as
@@ -267,6 +321,15 @@ internal static class RequestParameters
     /// reject a session that verifies correctly. Widening this predicate into a conformance check is a
     /// different job with a different blast radius.
     /// </para>
+    /// <para>
+    /// A query asking for several credentials is held to two more things. Every Credential Query must state its
+    /// type, not just the first, because an answer under any of them is checked against that one's type. And the
+    /// query must be readable as <see cref="DcqlAnswerRules"/>: each entry with a well-formed id of its own, its
+    /// credential sets well formed. SPEC: OpenID4VP 1.0 section 8.1 keys each answer by "the id value used for a
+    /// Credential Query", so without readable ids no answer can be matched to the entry it must be checked
+    /// against. A single-credential query without readable ids is still accepted, as it always was: every answer
+    /// is checked against its one entry.
+    /// </para>
     /// </remarks>
     public static bool AreRecoverable(PresentationRequest request) =>
         Read(request, StatesAQueryAndItsType);
@@ -278,8 +341,66 @@ internal static class RequestParameters
     public static bool AreRecoverable(DcApiPresentationRequest request) =>
         Read(request, StatesAQueryAndItsType);
 
-    private static bool StatesAQueryAndItsType(JsonElement root) =>
-        TryGetFirstCredential(root, out var credential) && StatesTheCredentialType(credential);
+    private static bool StatesAQueryAndItsType(JsonElement root)
+    {
+        if (!TryGetCredentials(root, out var query, out var credentials)
+            || !credentials.EnumerateArray().All(static credential =>
+                credential.ValueKind == JsonValueKind.Object && StatesTheCredentialType(credential)))
+        {
+            return false;
+        }
+
+        var rules = DcqlAnswerRules.TryRead(query);
+        if (rules is null)
+        {
+            return !SeveralCredentialsOf(root);
+        }
+
+        return TransactionDataOf(root) is not { } transactionData || TransactionDataIsCheckable(root, rules, transactionData);
+    }
+
+    /// <summary>
+    /// Whether every transaction data object names only Credential Queries of this request whose answer this library
+    /// can check transaction data in: SD-JWT VC, whose Key Binding JWT carries the hashes. An mdoc entry is refused,
+    /// because nothing here checks transaction data in an mdoc, so an mdoc answer could never acknowledge it. So is an
+    /// object naming two entries an answer may need together (<see cref="NamesEntriesNeededTogether"/>).
+    /// </summary>
+    // SPEC: OpenID4VP 1.0 section 5.1, credential_ids: "The string matches the id field in the DCQL Credential Query."
+    private static bool TransactionDataIsCheckable(JsonElement root, DcqlAnswerRules rules, IReadOnlyList<string> transactionData) =>
+        TransactionDataCredentialIds(transactionData) is { } all
+        && !NamesEntriesNeededTogether(rules, all)
+        && all.SelectMany(static ids => ids).All(id =>
+            TryGetCredential(root, id, out var credential)
+            && !string.Equals(TryGetString(credential, "format"), MdocVerifier.Format, StringComparison.Ordinal));
+
+    /// <summary>
+    /// Whether some transaction data object names two Credential Queries an answer may need together.
+    /// </summary>
+    /// <remarks>
+    /// SPEC: OpenID4VP 1.0 section 5.1, credential_ids: "If there is more than one element in the array, the Wallet
+    /// MUST use only one of the referenced Credentials for transaction authorization." So a conforming wallet
+    /// acknowledges the object in one presentation, and this library cannot tell which: it checks each SD-JWT VC
+    /// presentation against every object naming its entry, so the other one fails and is discarded. Where only one
+    /// of the named entries is ever needed, as for alternatives, that costs nothing. Where both may be needed, a valid
+    /// answer would be refused, so the request is refused instead, as this library's limit.
+    /// </remarks>
+    public static bool NamesEntriesNeededTogether(DcqlAnswerRules rules, IReadOnlyList<IReadOnlyList<string>> transactionDataIds) =>
+        transactionDataIds.Any(rules.AnyTwoMayBeNeededTogether);
+
+    /// <summary>
+    /// Whether the request's DCQL query asks for more than one Credential Query or carries <c>credential_sets</c>,
+    /// so that an answer can be matched to the entry it must be checked against only by its id.
+    /// </summary>
+    public static bool AsksForSeveralCredentials(PresentationRequest request) =>
+        Read(request, SeveralCredentialsOf);
+
+    /// <inheritdoc cref="AsksForSeveralCredentials(PresentationRequest)"/>
+    public static bool AsksForSeveralCredentials(DcApiPresentationRequest request) =>
+        Read(request, SeveralCredentialsOf);
+
+    private static bool SeveralCredentialsOf(JsonElement root) =>
+        TryGetCredentials(root, out var query, out var credentials)
+        && (credentials.GetArrayLength() > 1 || query.TryGetProperty("credential_sets", out _));
 
     /// <summary>
     /// Whether the DCQL entry states the credential type the matching verifier will compare against.
@@ -310,19 +431,48 @@ internal static class RequestParameters
                 && vctValues.EnumerateArray().Any(IsTypeIdentifier);
     }
 
-    private static bool TryGetFirstCredential(JsonElement root, out JsonElement credential)
+    private static bool TryGetFirstCredential(JsonElement root, out JsonElement credential) =>
+        TryGetCredential(root, credentialQueryId: null, out credential);
+
+    /// <summary>
+    /// The Credential Query whose id is <paramref name="credentialQueryId"/>, or the first when that is null.
+    /// </summary>
+    private static bool TryGetCredential(JsonElement root, string? credentialQueryId, out JsonElement credential)
     {
-        if (root.TryGetProperty("dcql_query", out var dcql)
-            && dcql.TryGetProperty("credentials", out var credentials)
-            && credentials.ValueKind == JsonValueKind.Array
-            && credentials.GetArrayLength() > 0)
+        credential = default;
+        if (!TryGetCredentials(root, out _, out var credentials))
+        {
+            return false;
+        }
+
+        if (credentialQueryId is null)
         {
             credential = credentials[0];
             return true;
         }
 
-        credential = default;
+        foreach (var entry in credentials.EnumerateArray())
+        {
+            if (entry.ValueKind == JsonValueKind.Object
+                && string.Equals(TryGetString(entry, "id"), credentialQueryId, StringComparison.Ordinal))
+            {
+                credential = entry;
+                return true;
+            }
+        }
+
         return false;
+    }
+
+    /// <summary>The request's <c>dcql_query</c> and its non-empty <c>credentials</c> array.</summary>
+    private static bool TryGetCredentials(JsonElement root, out JsonElement query, out JsonElement credentials)
+    {
+        credentials = default;
+        return root.TryGetProperty("dcql_query", out query)
+            && query.ValueKind == JsonValueKind.Object
+            && query.TryGetProperty("credentials", out credentials)
+            && credentials.ValueKind == JsonValueKind.Array
+            && credentials.GetArrayLength() > 0;
     }
 
     private static string? TryGetString(JsonElement element, string property) =>

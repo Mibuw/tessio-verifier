@@ -268,12 +268,14 @@ internal static class DcqlClaimsQuery
 
     /// <summary>
     /// Whether a claim id is one §6.3 allows: non-empty, and letters, digits, underscore or hyphen only.
+    /// §6.1 states the same rule in the same words for a Credential Query id, so that check uses this too.
     /// </summary>
     /// <remarks>
     /// ASCII letters and digits specifically. §6.3 says "alphanumeric", and the surrounding grammar is
     /// ASCII, so accepting any Unicode letter would emit an id this library considers fine and a strict
     /// wallet may not.
     /// </remarks>
-    private static bool IsWellFormedId(string id) =>
-        id.Length > 0 && id.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
+    internal static bool IsWellFormedId(string? id) =>
+        id is { Length: > 0 } &&
+        id.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-');
 }

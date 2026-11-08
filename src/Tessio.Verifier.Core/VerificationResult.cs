@@ -7,7 +7,8 @@ namespace Tessio.Verifier.Core;
 /// </summary>
 /// <remarks>
 /// FROZEN contract (contracts-v0). Forward-compatible: new optional inputs may be added as init-only
-/// properties, which is how <see cref="CredentialType"/> arrived. No existing member changes.
+/// properties, which is how <see cref="CredentialType"/>, <see cref="CredentialQueryId"/> and
+/// <see cref="VerifiedPresentations"/> arrived. No existing member changes.
 /// </remarks>
 public sealed record VerificationResult
 {
@@ -49,6 +50,53 @@ public sealed record VerificationResult
     /// </para>
     /// </remarks>
     public string? CredentialType { get; init; }
+
+    /// <summary>
+    /// The id of the DCQL Credential Query the verified presentation answered, when the verifier knows the request:
+    /// which alternative the wallet chose, for a query offering several. Null when it was not established.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// SPEC: OpenID4VP 1.0 section 6.4.3: "it is typically expected that the Wallet presents the End-User with a
+    /// choice of which Credential(s) to present if multiple of the sets of Credentials in options can satisfy the
+    /// request", so which one answered is known only from the response. Set by
+    /// <c>WalletResponseVerifier</c> in the ASP.NET Core package, from <see cref="PresentedCredential.CredentialQueryId"/>.
+    /// A credential verifier on its own does not set it, because it sees one presentation and not the request.
+    /// </para>
+    /// <para>
+    /// A response answering several Credential Queries yields one result. When the response verifies, it is the
+    /// presentation that verified whose Credential Query comes first in the query's <c>credentials</c> array, so the
+    /// order the wallet put its keys in does not change it, and this names that Credential Query.
+    /// <see cref="VerifiedPresentations"/> carries every presentation that verified. When what verified does not
+    /// answer the query, the result is the first presentation that failed and this names its Credential Query.
+    /// When the refusal concerns the request or the response as a whole rather than one presentation (a key naming no
+    /// Credential Query, an unverifiable request, transaction data no verified presentation acknowledges), this is null.
+    /// </para>
+    /// <para>
+    /// Init-only and optional, so every existing construction of this record still compiles and behaves as it did.
+    /// </para>
+    /// </remarks>
+    public string? CredentialQueryId { get; init; }
+
+    /// <summary>
+    /// For a passing result over a DCQL query whose Credential Query ids the verifier could read: the result of every
+    /// presentation that verified, in the order of the query's <c>credentials</c> array, each with its own
+    /// <see cref="CredentialQueryId"/>, claims and issuer. Null otherwise, including on every failing result.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The top-level members describe the first of these. A credential set option may need two credentials together
+    /// (OpenID4VP 1.0 section 6.2), and the second one's claims are reachable only here. A presentation that failed
+    /// and was discarded (section 8.6) is not listed.
+    /// </para>
+    /// <para>
+    /// The entries' own <see cref="VerifiedPresentations"/> are null, so the list is one level deep.
+    /// </para>
+    /// <para>
+    /// Init-only and optional, so every existing construction of this record still compiles and behaves as it did.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<VerificationResult>? VerifiedPresentations { get; init; }
 
     /// <summary>
     /// A passing result carrying the disclosed claims and resolved issuer. Convenience for tests and

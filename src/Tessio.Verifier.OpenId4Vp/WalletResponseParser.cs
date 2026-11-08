@@ -17,14 +17,42 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
     private readonly WalletResponseParserOptions _options;
 
     /// <summary>Creates the parser.</summary>
-    public WalletResponseParser(WalletResponseParserOptions? options = null) =>
+    /// <exception cref="ArgumentException">
+    /// <see cref="WalletResponseParserOptions.DcqlQueryJson"/> is set to something the parser cannot read as a DCQL query.
+    /// </exception>
+    public WalletResponseParser(WalletResponseParserOptions? options = null)
+    {
         _options = options ?? new WalletResponseParserOptions();
+        if (_options.DcqlQueryJson is { } query && DcqlAnswerRules.TryRead(query) is null)
+        {
+            throw new ArgumentException(UnreadableQuery, nameof(options));
+        }
+    }
+
+    private const string UnreadableQuery =
+        "WalletResponseParserOptions.DcqlQueryJson is not a DCQL query whose Credential Queries each carry a well-formed "
+        + "id of their own, with well-formed credential_sets and, when it asks for several credentials, a format on each.";
+
+    /// <summary>
+    /// The rules of <see cref="WalletResponseParserOptions.DcqlQueryJson"/>, read before any of the response is, so a
+    /// query changed on the options after construction to one the parser cannot read fails before the wallet's
+    /// answer is looked at, whatever it is.
+    /// </summary>
+    private DcqlAnswerRules? AnswerRules() =>
+        _options.DcqlQueryJson is { } query
+            ? DcqlAnswerRules.TryRead(query) ?? throw new InvalidOperationException(UnreadableQuery)
+            : null;
 
     /// <inheritdoc />
     /// <remarks>
     /// This contract returns credentials only, so an Authorization Error Response is thrown here as a
     /// <see cref="WalletResponseException"/>, as it always was. <see cref="ParseDetailedAsync"/> returns it.
     /// </remarks>
+    /// <exception cref="WalletResponseException">The response is malformed, or is an Authorization Error Response.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// <see cref="WalletResponseParserOptions.DcqlQueryJson"/> was changed after construction to something the parser
+    /// cannot read as a DCQL query. A value set before construction is refused by the constructor instead.
+    /// </exception>
     public async Task<IReadOnlyList<PresentedCredential>> ParseAsync(
         WalletResponseData response, CancellationToken ct = default)
     {
@@ -45,10 +73,15 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
     /// The response is malformed in any part its sender controls, or cannot be decrypted with the configured
     /// key. A caller that answers this exception as an invalid response has answered every such response.
     /// </exception>
+    /// <exception cref="InvalidOperationException">
+    /// <see cref="WalletResponseParserOptions.DcqlQueryJson"/> was changed after construction to something the parser
+    /// cannot read as a DCQL query.
+    /// </exception>
     public async Task<ParsedWalletResponse> ParseDetailedAsync(
         WalletResponseData response, CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(response);
+        var rules = AnswerRules();
 
         // SPEC: OpenID4VP 1.0 §8.2 — the wallet POSTs application/x-www-form-urlencoded.
         if (!response.ContentType.Contains("application/x-www-form-urlencoded", StringComparison.OrdinalIgnoreCase))
@@ -108,7 +141,7 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
 
         return new ParsedWalletResponse
         {
-            Credentials = ExtractCredentials(vpTokenJson),
+            Credentials = ExtractCredentials(vpTokenJson, rules),
             State = state,
             Encrypted = encrypted,
         };
@@ -290,7 +323,17 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
         return new ResponseClaims(vpTokenJson, state, null);
     }
 
-    private List<PresentedCredential> ExtractCredentials(string vpTokenJson)
+    /// <summary>
+    /// The presentations in a <c>vp_token</c>, read against the rules of
+    /// <see cref="WalletResponseParserOptions.DcqlQueryJson"/> when one is set (<see cref="AnswerRules"/>).
+    /// </summary>
+    private List<PresentedCredential> ExtractCredentials(string vpTokenJson, DcqlAnswerRules? rules)
+    {
+        var credentials = ReadVpToken(vpTokenJson);
+        return rules is null ? credentials : rules.Apply(credentials);
+    }
+
+    private List<PresentedCredential> ReadVpToken(string vpTokenJson)
     {
         JsonElement root;
         try
@@ -301,7 +344,7 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
         catch (JsonException) when (IsNotJson(vpTokenJson))
         {
             // A bare compact serialization (not JSON) is a single presentation string.
-            return [MakeCredential(vpTokenJson)];
+            return [MakeCredential(vpTokenJson, credentialQueryId: null)];
         }
         catch (JsonException e)
         {
@@ -311,19 +354,30 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
 
         // SPEC: OpenID4VP 1.0 §8.1 — vp_token is a JSON object mapping each DCQL Credential Query id
         // to an array of one or more presentations. Strings and single values are handled leniently
-        // for pre-final wallets.
+        // for pre-final wallets. Each presentation keeps the key it arrived under, which is what
+        // DcqlAnswerRules reads its format and its place in the query from.
         var credentials = new List<PresentedCredential>();
         switch (root.ValueKind)
         {
             case JsonValueKind.Object:
                 foreach (var query in root.EnumerateObject())
                 {
-                    CollectPresentations(query.Value, credentials);
+                    // SPEC: OpenID4VP 1.0 §8.1 — "the value is an array of one or more Presentations", and "There
+                    // MUST NOT be any entry in the JSON-encoded object for optional Credential Queries when there
+                    // are no matching Credentials". An empty array is therefore neither an answer nor an absence, and
+                    // nor is one holding only empty arrays: refused whenever a key yields no presentation at any
+                    // depth. The key is the sender's text, so it is not quoted.
+                    var before = credentials.Count;
+                    CollectPresentations(query.Value, query.Name, credentials);
+                    if (credentials.Count == before)
+                    {
+                        throw new WalletResponseException("vp_token carries a key with no presentation under it.");
+                    }
                 }
 
                 break;
             case JsonValueKind.Array or JsonValueKind.String:
-                CollectPresentations(root, credentials);
+                CollectPresentations(root, credentialQueryId: null, credentials);
                 break;
             default:
                 throw new WalletResponseException("vp_token is neither a JSON object, an array, nor a string.");
@@ -337,17 +391,17 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
         return credentials;
     }
 
-    private void CollectPresentations(JsonElement element, List<PresentedCredential> credentials)
+    private void CollectPresentations(JsonElement element, string? credentialQueryId, List<PresentedCredential> credentials)
     {
         switch (element.ValueKind)
         {
             case JsonValueKind.String:
-                credentials.Add(MakeCredential(element.GetString()!));
+                credentials.Add(MakeCredential(element.GetString()!, credentialQueryId));
                 break;
             case JsonValueKind.Array:
                 foreach (var item in element.EnumerateArray())
                 {
-                    CollectPresentations(item, credentials);
+                    CollectPresentations(item, credentialQueryId, credentials);
                 }
 
                 break;
@@ -396,9 +450,10 @@ public sealed partial class WalletResponseParser : IPresentationResponseParser
         }
     }
 
-    private PresentedCredential MakeCredential(string presentation) => new()
+    private PresentedCredential MakeCredential(string presentation, string? credentialQueryId) => new()
     {
         Format = _options.PresentationFormat,
         RawValue = presentation,
+        CredentialQueryId = credentialQueryId,
     };
 }

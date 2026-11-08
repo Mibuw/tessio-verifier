@@ -166,6 +166,83 @@ public sealed class AnonymousSurfaceDisclosureTests : IAsyncDisposable
         Assert.DoesNotContain(DevResolverSource, body, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A session completed with a result whose nested <see cref="Core.VerificationResult.VerifiedPresentations"/>
+    /// carry a locator and a free text message of their own, written to the store directly so that the nested values
+    /// are known to be there and anything the surface shows of them is the narrowing's doing.
+    /// </summary>
+    private async Task<string> CompleteWithNestedResultsAsync()
+    {
+        var store = _host!.Services.GetRequiredService<InMemorySessionStore>();
+        var options = _host.Services.GetRequiredService<IOptions<VerifierOptions>>().Value;
+        var session = await store.CreateAsync(DemoRequestOptionsFactory.Create(options, new Uri("http://localhost/verify/callback")));
+
+        var issuer = new Core.IssuerInfo
+        {
+            Identifier = "https://issuer.example",
+            Trusted = true,
+            KeyResolutionMethod = "x5c",
+            TrustListSource = ResolverAuthoredLocator,
+        };
+        var nested = Core.VerificationResult.Valid(new Dictionary<string, object> { ["age_over_18"] = true }, issuer) with
+        {
+            Errors = [new Core.VerificationError { Code = "example", Message = ResolverAuthoredLocator }],
+        };
+        var top = Core.VerificationResult.Valid(new Dictionary<string, object>(), issuer) with { VerifiedPresentations = [nested] };
+        await store.CompleteAsync(session.SessionId, top);
+        return session.SessionId;
+    }
+
+    [Fact]
+    public async Task Status_NarrowsEveryNestedVerifiedPresentation_TooNotOnlyTheTopLevelResult()
+    {
+        var client = StartHost();
+        var sessionId = await CompleteWithNestedResultsAsync();
+
+        var body = await client.GetStringAsync($"/verify/{sessionId}");
+        var nested = JsonDocument.Parse(body).RootElement.GetProperty("result").GetProperty("verifiedPresentations")[0];
+
+        Assert.Equal(VerifierOptions.UndisclosedTrustListSource, nested.GetProperty("issuer").GetProperty("trustListSource").GetString());
+        Assert.Equal(VerifierOptions.UndisclosedErrorMessage, nested.GetProperty("errors")[0].GetProperty("message").GetString());
+        Assert.DoesNotContain(ResolverAuthoredLocator, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Stream_NarrowsEveryNestedVerifiedPresentation_Too()
+    {
+        var client = StartHost();
+        var sessionId = await CompleteWithNestedResultsAsync();
+
+        var body = await client.GetStringAsync($"/verify/{sessionId}/stream");
+
+        Assert.Contains("verifiedPresentations", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(ResolverAuthoredLocator, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Status_CarriesANestedClaimAtTheDepthBound()
+    {
+        // SdJwtVcVerifier refuses a claim deeper than JsonValueConverter.MaxDepth, so this is the deepest a nested
+        // verified presentation can carry. It serializes with room to spare under the serializer's depth limit.
+        var client = StartHost();
+        var store = _host!.Services.GetRequiredService<InMemorySessionStore>();
+        var options = _host.Services.GetRequiredService<IOptions<VerifierOptions>>().Value;
+        var session = await store.CreateAsync(DemoRequestOptionsFactory.Create(options, new Uri("http://localhost/verify/callback")));
+        object deep = 1L;
+        // JsonValueConverter.MaxDepth, internal to the core package; its own tests pin the bound at this value.
+        for (var i = 0; i < 32; i++)
+        {
+            deep = new Dictionary<string, object> { ["a"] = deep };
+        }
+
+        var nested = Core.VerificationResult.Valid(new Dictionary<string, object> { ["deep"] = deep }, Core.IssuerInfo.Unknown);
+        await store.CompleteAsync(session.SessionId, nested with { VerifiedPresentations = [nested] });
+
+        var response = await client.GetAsync($"/verify/{session.SessionId}");
+
+        response.EnsureSuccessStatusCode();
+    }
+
     [Fact]
     public async Task Status_AnchorProvenance_IsNotNarrowed()
     {

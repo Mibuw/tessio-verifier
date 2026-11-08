@@ -58,8 +58,12 @@ public static class ClientMetadata
         IReadOnlyDictionary<string, JsonNode?>? additionalMembers)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(credentialFormat);
-        var metadata = Standard(credentialFormat, responseEncryptionJwk);
+        return WithAdditionalMembers(Standard(VpFormatsSupported(credentialFormat), responseEncryptionJwk), additionalMembers);
+    }
 
+    private static string WithAdditionalMembers(
+        JsonObject metadata, IReadOnlyDictionary<string, JsonNode?>? additionalMembers)
+    {
         foreach (var (name, value) in additionalMembers ?? new Dictionary<string, JsonNode?>())
         {
             if (metadata.ContainsKey(name) || StandardMemberNames.Contains(name))
@@ -75,13 +79,62 @@ public static class ClientMetadata
         return metadata.ToJsonString(JsonDefaults.Relaxed);
     }
 
+    /// <summary>
+    /// Builds <c>client_metadata</c> for a request whose DCQL query asks for credentials in several formats, such as
+    /// one built by <see cref="Dcql.AnyOf"/> offering a PID as an mdoc or as an SD-JWT VC.
+    /// <c>vp_formats_supported</c> lists every format given, each once.
+    /// </summary>
+    /// <param name="credentialFormats">The formats the query names, at least one: <c>dc+sd-jwt</c>, <c>mso_mdoc</c> or both.</param>
+    /// <param name="responseEncryptionJwk">The public half of the response-encryption key, or null.</param>
+    /// <param name="additionalMembers">Members to add, as for <see cref="Build(string, JsonObject?, IReadOnlyDictionary{string, JsonNode?}?)"/>.</param>
+    /// <returns>The <c>client_metadata</c> JSON.</returns>
+    /// <exception cref="ArgumentException">
+    /// No format is given, a format is neither of the two, or a name in <paramref name="additionalMembers"/> is one
+    /// this builder writes.
+    /// </exception>
+    /// <remarks>
+    /// SPEC: OpenID4VP 1.0 section 11.1, vp_formats_supported: "An object containing a list of name/value pairs,
+    /// where the name is a Credential Format Identifier and the value defines format-specific parameters that a
+    /// Verifier supports." A wallet holding only the format left out would find the request asks for nothing it can
+    /// answer in. A format other than the two is refused here rather than advertised as SD-JWT VC, as the single
+    /// format builder does with anything that is not <c>mso_mdoc</c>.
+    /// </remarks>
+    public static string BuildForFormats(
+        IReadOnlyList<string> credentialFormats,
+        JsonObject? responseEncryptionJwk = null,
+        IReadOnlyDictionary<string, JsonNode?>? additionalMembers = null)
+    {
+        ArgumentNullException.ThrowIfNull(credentialFormats);
+        if (credentialFormats.Count == 0)
+        {
+            throw new ArgumentException("client_metadata needs at least one credential format.", nameof(credentialFormats));
+        }
+
+        var formats = new JsonObject();
+        foreach (var format in credentialFormats)
+        {
+            if (format is not (Dcql.SdJwtVcFormat or Dcql.MdocFormat))
+            {
+                throw new ArgumentException(
+                    $"'{format}' is not a credential format this builder advertises: dc+sd-jwt or mso_mdoc.",
+                    nameof(credentialFormats));
+            }
+
+            if (!formats.ContainsKey(format))
+            {
+                formats[format] = VpFormatsSupported(format)[format]!.DeepClone();
+            }
+        }
+
+        return WithAdditionalMembers(Standard(formats, responseEncryptionJwk), additionalMembers);
+    }
+
     /// <summary>Every member the standard builder may write, whether or not this call writes it.</summary>
     private static readonly HashSet<string> StandardMemberNames =
         ["vp_formats_supported", "jwks", "encrypted_response_enc_values_supported"];
 
-    private static JsonObject Standard(string credentialFormat, JsonObject? responseEncryptionJwk)
+    private static JsonObject Standard(JsonObject vpFormatsSupported, JsonObject? responseEncryptionJwk)
     {
-
         // Neither client_id nor client_name belongs here, and both used to. client_id is an
         // authorization request parameter. client_name was a display name for the consent screen, and
         // dropping it is the safer behaviour rather than a loss: under an x509 client identifier the
@@ -93,7 +146,7 @@ public static class ClientMetadata
             // SPEC: OpenID4VP 1.0 Appendix B.2.2 (mdoc) and B.3.4 (SD-JWT VC) — REQUIRED, keyed by
             // credential format. Without it a wallet cannot learn which signature algorithms we accept,
             // and the EC reference wallet refuses the request outright.
-            ["vp_formats_supported"] = VpFormatsSupported(credentialFormat),
+            ["vp_formats_supported"] = vpFormatsSupported,
         };
 
         if (responseEncryptionJwk is not null)

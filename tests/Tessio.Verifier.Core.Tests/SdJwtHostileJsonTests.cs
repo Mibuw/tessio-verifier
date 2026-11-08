@@ -293,4 +293,35 @@ public class SdJwtHostileJsonTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Code == ErrorCodes.DisclosureInvalid);
     }
+
+    /// <summary>A claim value that is <paramref name="depth"/> objects nested one in the next.</summary>
+    private static string Nested(int depth) =>
+        string.Concat(Enumerable.Repeat("{\"a\":", depth)) + "1" + new string('}', depth);
+
+    [Fact]
+    public async Task VerifyAsync_AClaimNestedToTheBound_Verifies()
+    {
+        var builder = new TestCredentialBuilder();
+        AddRawDisclosure(builder, $"[\"salt-deep\",\"deep\",{Nested(JsonValueConverter.MaxDepth)}]");
+
+        var result = await VerifyAsync(builder);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => e.Code)));
+        // Pinned, because the session view's serialization test in the ASP.NET Core package relies on this value.
+        Assert.Equal(32, JsonValueConverter.MaxDepth);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AClaimNestedPastTheBound_IsRefused()
+    {
+        // Within the depth any one JSON text is parsed at, and beyond what a result's readers can carry once it sits
+        // inside a session view. Recursive disclosures could reach further still.
+        var builder = new TestCredentialBuilder();
+        AddRawDisclosure(builder, $"[\"salt-deep\",\"deep\",{Nested(JsonValueConverter.MaxDepth + 1)}]");
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.StructureInvalid);
+    }
 }

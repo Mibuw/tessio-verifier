@@ -92,6 +92,16 @@ internal sealed record SessionView
                 Issuer = result.Issuer with { TrustListSource = VerifierOptions.UndisclosedTrustListSource },
             };
 
+        // Every nested result is a result like this one and goes out beside it, so it is narrowed by the same
+        // rules. Each carries its own issuer, and so its own trust list source.
+        if (narrowed.VerifiedPresentations is { } presentations)
+        {
+            narrowed = narrowed with
+            {
+                VerifiedPresentations = [.. presentations.Select(p => Narrow(p, publicTrustListSources)!)],
+            };
+        }
+
         // Read from narrowed, not from result. They hold the same errors today, and a later narrowing
         // that touched them first would silently lose its work if this went back to the original.
         return narrowed.Errors.Count == 0
