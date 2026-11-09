@@ -2,6 +2,7 @@ using System.Formats.Cbor;
 using System.Security.Cryptography;
 using System.Security.Cryptography.Cose;
 using System.Security.Cryptography.X509Certificates;
+using Tessio.Verifier.Trust;
 
 namespace Tessio.Verifier.Core.Mdoc;
 

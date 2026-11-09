@@ -4,6 +4,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
+using Tessio.Verifier.Trust;
 
 namespace Tessio.Verifier.Core;
 
@@ -233,18 +234,7 @@ internal sealed class IssuerKeyResolver
             throw new SdJwtProcessingException(ErrorCodes.IssuerKeyUnresolvable, e.Message);
         }
 
-        var chain = new List<X509Certificate2>();
-        try
-        {
-            var collection = new X509Certificate2Collection();
-            collection.ImportFromPem(System.Text.Encoding.ASCII.GetString(resource.Body));
-            chain.AddRange(collection);
-        }
-        catch (CryptographicException)
-        {
-            // Fall through to the empty check: a resource holding no certificate is refused below.
-        }
-
+        var chain = ReadPemCertificates(resource.Body);
         if (chain.Count == 0)
         {
             throw new SdJwtProcessingException(
@@ -253,6 +243,36 @@ internal sealed class IssuerKeyResolver
 
         RequireThumbprintMatch(chain[0].RawData, thumbprint);
         return ResolveFromX5c(chain, iss) with { FetchedX5u = resource };
+    }
+
+    // The CERTIFICATE blocks of a PEM body, in order, each through the one DER loader; other block types are
+    // skipped. Empty when there is none, or when any block is not exactly one DER certificate: the resource is then
+    // not a certificate chain at all, rather than a shorter one.
+    private static List<X509Certificate2> ReadPemCertificates(byte[] body)
+    {
+        var text = System.Text.Encoding.ASCII.GetString(body);
+        var chain = new List<X509Certificate2>();
+        var offset = 0;
+        try
+        {
+            while (PemEncoding.TryFind(text.AsSpan(offset), out var fields))
+            {
+                var block = text.AsSpan(offset);
+                if (block[fields.Label].SequenceEqual("CERTIFICATE"))
+                {
+                    chain.Add(DerCertificate.Load(Convert.FromBase64String(block[fields.Base64Data].ToString())));
+                }
+
+                offset += fields.Location.End.Value;
+            }
+        }
+        catch (Exception e) when (e is CryptographicException or FormatException)
+        {
+            chain.ForEach(certificate => certificate.Dispose());
+            chain.Clear();
+        }
+
+        return chain;
     }
 
     /// <summary>
@@ -315,6 +335,7 @@ internal sealed class IssuerKeyResolver
             return null;
         }
 
+        var chain = new List<X509Certificate2>();
         try
         {
             if (x5c.ValueKind != JsonValueKind.Array || x5c.GetArrayLength() == 0)
@@ -322,13 +343,17 @@ internal sealed class IssuerKeyResolver
                 throw new FormatException("x5c is not a non-empty array.");
             }
 
-            return x5c.EnumerateArray()
-                .Select(entry => LoadCertificate(Convert.FromBase64String(entry.GetString()
-                    ?? throw new FormatException("x5c entry is not a string."))))
-                .ToList();
+            foreach (var entry in x5c.EnumerateArray())
+            {
+                chain.Add(DerCertificate.Load(Convert.FromBase64String(entry.GetString()
+                    ?? throw new FormatException("x5c entry is not a string."))));
+            }
+
+            return chain;
         }
         catch (Exception e) when (e is FormatException or InvalidOperationException or CryptographicException)
         {
+            chain.ForEach(certificate => certificate.Dispose());
             throw new SdJwtProcessingException(
                 ErrorCodes.IssuerKeyUnresolvable, "The x5c header is not a valid base64 DER certificate chain.");
         }
@@ -346,13 +371,6 @@ internal sealed class IssuerKeyResolver
                 ErrorCodes.StructureInvalid, $"The token's JOSE header is not JSON with {StrictJson.Accepts}.");
         }
     }
-
-    private static X509Certificate2 LoadCertificate(byte[] der) =>
-#if NET9_0_OR_GREATER
-        X509CertificateLoader.LoadCertificate(der);
-#else
-        new(der);
-#endif
 
     private static IssuerKeyResolution ResolveFromX5c(List<X509Certificate2> certificates, string? iss)
     {
@@ -557,7 +575,17 @@ internal sealed class IssuerKeyResolver
                 ErrorCodes.IssuerMetadataInvalid, "JWT VC Issuer Metadata carries neither 'jwks' nor a valid https 'jwks_uri'.");
         }
 
-        var keys = new JsonWebKeySet(jwks.GetRawText()).GetSigningKeys().ToList();
+        List<SecurityKey> keys;
+        try
+        {
+            keys = JwkKeyMembers.SigningKeys(jwks.GetRawText());
+        }
+        catch (ArgumentException)
+        {
+            // A 'jwks' that is not a JWK Set object: the parser's own refusal, answered as the metadata fault it is.
+            throw new SdJwtProcessingException(ErrorCodes.IssuerMetadataInvalid, "The issuer's 'jwks' is not a JWK Set.");
+        }
+
         if (keys.Count == 0)
         {
             throw new SdJwtProcessingException(

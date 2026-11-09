@@ -61,6 +61,12 @@ internal sealed class TestCredentialBuilder : IDisposable
 
     public bool IncludeCnf { get; set; } = true;
 
+    /// <summary>An RSA holder key instead of the EC one: cnf.jwk carries its n and e, and the KB-JWT is RS256. The caller disposes it.</summary>
+    public RSA? HolderRsa { get; set; }
+
+    /// <summary>An RSA issuer key instead of the EC one: the issuer JWT is RS256. The caller disposes it.</summary>
+    public RSA? IssuerRsa { get; set; }
+
     public bool IncludeKbJwt { get; set; } = true;
 
     public string KbAudience { get; set; } = DefaultAudience;
@@ -182,7 +188,20 @@ internal sealed class TestCredentialBuilder : IDisposable
             };
         }
 
-        if (IncludeCnf)
+        if (IncludeCnf && HolderRsa is { } holderRsa)
+        {
+            var rp = holderRsa.ExportParameters(false);
+            payload["cnf"] = new Dictionary<string, object>
+            {
+                ["jwk"] = new Dictionary<string, object>
+                {
+                    ["kty"] = "RSA",
+                    ["n"] = Base64UrlEncoder.Encode(rp.Modulus!),
+                    ["e"] = Base64UrlEncoder.Encode(rp.Exponent!),
+                },
+            };
+        }
+        else if (IncludeCnf)
         {
             var hp = _holderEcdsa.ExportParameters(false);
             payload["cnf"] = new Dictionary<string, object>
@@ -230,7 +249,7 @@ internal sealed class TestCredentialBuilder : IDisposable
 
         var issuerJwt = SignJwt(
             RewritePayloadJson?.Invoke(JsonSerializer.Serialize(payload)) ?? JsonSerializer.Serialize(payload),
-            new ECDsaSecurityKey(_issuerEcdsa),
+            IssuerRsa is { } issuerRsa ? new RsaSecurityKey(issuerRsa) : new ECDsaSecurityKey(_issuerEcdsa),
             Typ,
             Certificate is { } cert ? new List<string> { Convert.ToBase64String(cert.RawData) } : null,
             RewriteHeaderJson);
@@ -264,7 +283,8 @@ internal sealed class TestCredentialBuilder : IDisposable
 
         var kbPayload = RewriteKbPayloadJson?.Invoke(JsonSerializer.Serialize(kbClaims)) ?? JsonSerializer.Serialize(kbClaims);
 
-        return withoutKb + SignJwt(kbPayload, new ECDsaSecurityKey(_holderEcdsa), "kb+jwt", x5c: null);
+        return withoutKb + SignJwt(
+            kbPayload, HolderRsa is { } holderKey ? new RsaSecurityKey(holderKey) : new ECDsaSecurityKey(_holderEcdsa), "kb+jwt", x5c: null);
     }
 
     /// <summary>
@@ -371,13 +391,13 @@ internal sealed class TestCredentialBuilder : IDisposable
         if (rewriteHeaderJson is null && rewritePayloadBytes is null)
         {
             var handler = new JsonWebTokenHandler { SetDefaultTimesOnTokenCreation = false };
-            return handler.CreateToken(payload, new SigningCredentials(key, SecurityAlgorithms.EcdsaSha256), headers);
+            return handler.CreateToken(payload, new SigningCredentials(key, AlgorithmFor(key)), headers);
         }
 
         // Signed by hand, for a header or payload the handler would not write: a repeated member, or bytes that
         // are not UTF-8. RFC 7515 §5.1: the signature is over ASCII(BASE64URL(header) || '.' || BASE64URL(payload)),
         // and RFC 7518 §3.4 wants ES256's r and s as fixed-length big-endian, which is .NET's default format.
-        var withAlg = new Dictionary<string, object> { ["alg"] = SecurityAlgorithms.EcdsaSha256 };
+        var withAlg = new Dictionary<string, object> { ["alg"] = AlgorithmFor(key) };
         foreach (var (name, value) in headers)
         {
             withAlg[name] = value;
@@ -388,9 +408,16 @@ internal sealed class TestCredentialBuilder : IDisposable
         var payloadBytes = Encoding.UTF8.GetBytes(payload);
         payloadBytes = rewritePayloadBytes?.Invoke(payloadBytes) ?? payloadBytes;
         var signingInput = Base64UrlEncoder.Encode(Encoding.UTF8.GetBytes(headerJson)) + "." + Base64UrlEncoder.Encode(payloadBytes);
-        var signature = ((ECDsaSecurityKey)key).ECDsa.SignData(Encoding.ASCII.GetBytes(signingInput), HashAlgorithmName.SHA256);
+        var input = Encoding.ASCII.GetBytes(signingInput);
+        var signature = key is RsaSecurityKey rsa
+            ? rsa.Rsa.SignData(input, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+            : ((ECDsaSecurityKey)key).ECDsa.SignData(input, HashAlgorithmName.SHA256);
         return signingInput + "." + Base64UrlEncoder.Encode(signature);
     }
+
+    // RS256 for an RSA key (RFC 7518 §3.3), ES256 otherwise.
+    private static string AlgorithmFor(SecurityKey key) =>
+        key is RsaSecurityKey ? SecurityAlgorithms.RsaSha256 : SecurityAlgorithms.EcdsaSha256;
 
     public void Dispose()
     {

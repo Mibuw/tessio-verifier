@@ -414,11 +414,11 @@ public sealed class SdJwtVcVerifier : ICredentialVerifier
         SecurityKey holderKey;
         try
         {
-            holderKey = new JsonWebKey(jwkNode.ToJsonString());
+            holderKey = JwkKeyMembers.Key(jwkNode.ToJsonString());
         }
         catch (ArgumentException)
         {
-            errors.Add(new VerificationError { Code = ErrorCodes.ConfirmationKeyMissing, Message = "The credential's cnf.jwk is not a valid JWK." });
+            errors.Add(new VerificationError { Code = ErrorCodes.ConfirmationKeyMissing, Message = "The credential's cnf.jwk is not a valid JWK, or names no key." });
             return;
         }
 

@@ -113,6 +113,91 @@ public sealed class X5uTests : IDisposable
         Assert.DoesNotContain(Url, _http.Requested);
     }
 
+    [Theory]
+    [InlineData("x5c")]
+    [InlineData("X5C")]
+    public async Task AnIssuerKeyJudgedByItsX5cRatherThanItsKeyMembers_DoesNotVerify(string certificateMember)
+    {
+        // SPEC: RFC 7517 §4.7, the x5c key "MUST match the public key represented by other members of the JWK".
+        // The metadata's RSA key names another key in n and e and carries the signer's certificate. The key set's
+        // keys are their key members, so the signature does not verify, however the member's name is cased. RSA,
+        // because a key set also yields a key built from an RSA key's certificate; an EC key is built from x and y
+        // alone.
+        Header(x5u: null, thumbprint: null);
+        using var signer = RSA.Create(2048);
+        using var other = RSA.Create(2048);
+        _builder.IssuerRsa = signer;
+        using var signerCertificate = new CertificateRequest("CN=Test Issuer", signer, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+        var key = other.ExportParameters(false);
+        var jwks = $$"""{"keys":[{"kty":"RSA","n":"{{Base64UrlEncoder.Encode(key.Modulus!)}}","e":"{{Base64UrlEncoder.Encode(key.Exponent!)}}","{{certificateMember}}":["{{Convert.ToBase64String(signerCertificate.RawData)}}"]}]}""";
+        _http.Map("https://issuer.example/.well-known/jwt-vc-issuer", $$"""{"issuer":"{{_builder.Issuer}}","jwks":{{jwks}}}""");
+
+        var result = await VerifyAsync(resolveX5u: false);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.SignatureInvalid);
+    }
+
+    [Fact]
+    public async Task AnIssuerKeyWithACertificateButNoKeyMembers_IsNoSigningKey()
+    {
+        // SPEC: RFC 7518 §6.3.1, an RSA public key's n and e "MUST be present". A key that carries only the signer's
+        // certificate has no key members, so the set holds no signing key.
+        Header(x5u: null, thumbprint: null);
+        using var signer = RSA.Create(2048);
+        _builder.IssuerRsa = signer;
+        using var signerCertificate = new CertificateRequest("CN=Test Issuer", signer, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+        var jwks = $$"""{"keys":[{"kty":"RSA","x5c":["{{Convert.ToBase64String(signerCertificate.RawData)}}"]}]}""";
+        _http.Map("https://issuer.example/.well-known/jwt-vc-issuer", $$"""{"issuer":"{{_builder.Issuer}}","jwks":{{jwks}}}""");
+
+        var result = await VerifyAsync(resolveX5u: false);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerMetadataInvalid);
+    }
+
+    [Fact]
+    public async Task AnIssuerKeyThatIsNoSigningKey_IsLeftOut_WhateverTheProcessWideDefault()
+    {
+        // The process-wide default would hand an unresolved JWK on as a key; the metadata's key set never does.
+        Header(x5u: null, thumbprint: null);
+        using var signer = RSA.Create(2048);
+        _builder.IssuerRsa = signer;
+        var key = signer.ExportParameters(false);
+        var jwks = $$"""{"keys":[{"kty":"RSA","use":"enc","n":"{{Base64UrlEncoder.Encode(key.Modulus!)}}","e":"{{Base64UrlEncoder.Encode(key.Exponent!)}}"}]}""";
+        _http.Map("https://issuer.example/.well-known/jwt-vc-issuer", $$"""{"issuer":"{{_builder.Issuer}}","jwks":{{jwks}}}""");
+
+        var before = JsonWebKeySet.DefaultSkipUnresolvedJsonWebKeys;
+        JsonWebKeySet.DefaultSkipUnresolvedJsonWebKeys = false;
+        try
+        {
+            var result = await VerifyAsync(resolveX5u: false);
+
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerMetadataInvalid);
+        }
+        finally
+        {
+            JsonWebKeySet.DefaultSkipUnresolvedJsonWebKeys = before;
+        }
+    }
+
+    [Theory]
+    [InlineData("\"not a key set\"")]
+    [InlineData("[]")]
+    public async Task IssuerMetadataWhoseJwksIsNotAKeySet_IsRefused_NotThrown(string jwks)
+    {
+        Header(x5u: null, thumbprint: null);
+        _http.Map("https://issuer.example/.well-known/jwt-vc-issuer", $$"""{"issuer":"{{_builder.Issuer}}","jwks":{{jwks}}}""");
+
+        var result = await VerifyAsync(resolveX5u: false);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerMetadataInvalid);
+    }
+
     [Fact]
     public async Task ByDefault_AnX5uThatIsNotAString_IsIgnored()
     {
@@ -223,6 +308,34 @@ public sealed class X5uTests : IDisposable
 
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerKeyUnresolvable && e.Message.Contains("PEM", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnX5uCertificateBlockHoldingABundleAroundTheSigner_IsRefused()
+    {
+        // A CERTIFICATE block holds one DER certificate, read by the same loader as an x5c entry. The signer wrapped
+        // in a PKCS#12 would match the thumbprint if the bundle were read as the certificate inside it.
+        Header(Url, OwnThumbprint);
+        var bundle = new X509Certificate2Collection(_certificate).Export(X509ContentType.Pkcs12)!;
+        _http.MapBytes(Url, System.Text.Encoding.ASCII.GetBytes(PemEncoding.WriteString("CERTIFICATE", bundle)));
+
+        var result = await VerifyAsync();
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerKeyUnresolvable && e.Message.Contains("PEM", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnX5uResourceWithAnotherBlockBeforeTheCertificate_StillVerifies()
+    {
+        // Only CERTIFICATE blocks are read, in order; anything else in the file is skipped.
+        Header(Url, OwnThumbprint);
+        var other = PemEncoding.WriteString("PUBLIC KEY", _certificate.PublicKey.ExportSubjectPublicKeyInfo());
+        _http.MapBytes(Url, System.Text.Encoding.ASCII.GetBytes(other + "\n" + Pem(_certificate)));
+
+        var result = await VerifyAsync();
+
+        Assert.True(result.IsValid, Errors(result));
     }
 
     [Fact]

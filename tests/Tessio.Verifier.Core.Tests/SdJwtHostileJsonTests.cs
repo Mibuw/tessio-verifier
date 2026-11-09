@@ -28,6 +28,146 @@ public class SdJwtHostileJsonTests
 
     private static string Raw(string json) => Base64UrlEncoder.Encode(json);
 
+    // Rewrites cnf.jwk so it names keyMembers in n and e (or keeps the holder's when null) and, under the member name
+    // given, carries a self-signed certificate for the RSA key that signs the KB-JWT. RSA, because that is the key
+    // type a token handler builds from a certificate in preference to the key members; an EC key is built from x
+    // and y regardless.
+    private static Func<string, string> HolderJwk(
+        System.Security.Cryptography.RSA signer, System.Security.Cryptography.RSA? keyMembers, string? certificateMember) => json =>
+    {
+        var payload = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        var jwk = payload["cnf"]!["jwk"]!.AsObject();
+        if (certificateMember is not null)
+        {
+            using var certificate = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                    "CN=Test Holder", signer, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                    System.Security.Cryptography.RSASignaturePadding.Pkcs1)
+                .CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+            jwk[certificateMember] = new System.Text.Json.Nodes.JsonArray(Convert.ToBase64String(certificate.RawData));
+        }
+
+        if (keyMembers is not null)
+        {
+            var parameters = keyMembers.ExportParameters(false);
+            jwk["n"] = Base64UrlEncoder.Encode(parameters.Modulus!);
+            jwk["e"] = Base64UrlEncoder.Encode(parameters.Exponent!);
+        }
+
+        return payload.ToJsonString();
+    };
+
+    [Theory]
+    [InlineData("x5c")]
+    [InlineData("X5C")]
+    public async Task VerifyAsync_AHolderKeyJudgedByItsX5cRatherThanItsKeyMembers_IsRefused(string certificateMember)
+    {
+        // SPEC: RFC 7517 §4.7, the x5c key "MUST match the public key represented by other members of the JWK".
+        // cnf.jwk names one key in n and e and carries a certificate for another, which signed the KB-JWT. The
+        // holder key is its key members, so the KB-JWT does not verify, however the member's name is cased.
+        using var holder = System.Security.Cryptography.RSA.Create(2048);
+        using var other = System.Security.Cryptography.RSA.Create(2048);
+        var builder = new TestCredentialBuilder { HolderRsa = holder, RewritePayloadJson = HolderJwk(holder, other, certificateMember) };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.KeyBindingInvalid);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AnRsaHolderKeyWhoseX5cMatchesItsKeyMembers_StillVerifies()
+    {
+        using var holder = System.Security.Cryptography.RSA.Create(2048);
+        var builder = new TestCredentialBuilder { HolderRsa = holder, RewritePayloadJson = HolderJwk(holder, keyMembers: null, "x5c") };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Errors.Select(e => $"{e.Code}: {e.Message}")));
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AHolderKeyCarryingAnotherKeysCertificate_LeavesNothingBehindForTheNextPresentation()
+    {
+        // A certificate in one presentation's cnf.jwk has no effect on a later presentation.
+        using var holder = System.Security.Cryptography.RSA.Create(2048);
+        using var other = System.Security.Cryptography.RSA.Create(2048);
+
+        using var first = new TestCredentialBuilder { HolderRsa = other, RewritePayloadJson = HolderJwk(other, holder, "X5C") };
+        using var firstCertificate = first.UseCertificate();
+        await new SdJwtVcVerifier(new FakeTrustListResolver(trusted: false), httpClient: new HttpClient(new FakeHttpHandler()))
+            .VerifyAsync(new PresentedCredential { Format = "dc+sd-jwt", RawValue = first.Build() }, Context(), null);
+
+        using var second = new TestCredentialBuilder { HolderRsa = other, RewritePayloadJson = HolderJwk(other, holder, certificateMember: null) };
+        var result = await VerifyAsync(second);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.KeyBindingInvalid);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AHolderKey_IsJudgedByItselfWhateverElseTheProcessVerifiedWithTheSameKeyMembers()
+    {
+        // The holder key is a key of its own, not a JWK: it is judged by its key members whatever else the process
+        // has verified.
+        using var holder = System.Security.Cryptography.RSA.Create(2048);
+        using var other = System.Security.Cryptography.RSA.Create(2048);
+        using var otherCertificate = new System.Security.Cryptography.X509Certificates.CertificateRequest(
+                "CN=Test Other", other, System.Security.Cryptography.HashAlgorithmName.SHA256,
+                System.Security.Cryptography.RSASignaturePadding.Pkcs1)
+            .CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddYears(1));
+        var holderParameters = holder.ExportParameters(false);
+        var elsewhere = new JsonWebKey
+        {
+            Kty = "RSA",
+            N = Base64UrlEncoder.Encode(holderParameters.Modulus!),
+            E = Base64UrlEncoder.Encode(holderParameters.Exponent!),
+        };
+        elsewhere.X5c.Add(Convert.ToBase64String(otherCertificate.RawData));
+        var handler = new Microsoft.IdentityModel.JsonWebTokens.JsonWebTokenHandler();
+        var token = handler.CreateToken(new SecurityTokenDescriptor
+        {
+            SigningCredentials = new SigningCredentials(new RsaSecurityKey(other), SecurityAlgorithms.RsaSha256),
+        });
+        var elsewhereResult = await handler.ValidateTokenAsync(token, new TokenValidationParameters
+        {
+            IssuerSigningKey = elsewhere,
+            ValidateIssuer = false,
+            ValidateAudience = false,
+            ValidateLifetime = false,
+        });
+        Assert.True(elsewhereResult.IsValid, "The other component's verification is the precondition of this test.");
+
+        using var credential = new TestCredentialBuilder { HolderRsa = other, RewritePayloadJson = HolderJwk(other, holder, certificateMember: null) };
+        var result = await VerifyAsync(credential);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.KeyBindingInvalid);
+    }
+
+    [Fact]
+    public async Task VerifyAsync_AHolderKeyWhoseKeyMembersMakeNoKey_IsRefusedAsNoHolderKey()
+    {
+        // SPEC: RFC 7518 §6.3.1, an RSA public key's n and e "MUST be present". A cnf.jwk with neither names no key.
+        using var holder = System.Security.Cryptography.RSA.Create(2048);
+        var builder = new TestCredentialBuilder
+        {
+            HolderRsa = holder,
+            RewritePayloadJson = json =>
+            {
+                var payload = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+                var jwk = payload["cnf"]!["jwk"]!.AsObject();
+                jwk.Remove("n");
+                jwk.Remove("e");
+                return payload.ToJsonString();
+            },
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.ConfirmationKeyMissing);
+    }
+
     private static void AddRawDisclosure(TestCredentialBuilder builder, string json)
     {
         var disclosure = Raw(json);
@@ -75,6 +215,38 @@ public class SdJwtHostileJsonTests
         Assert.False(result.IsValid);
         Assert.Contains(result.Errors, e => e.Code == ErrorCodes.StructureInvalid
                                             && e.Message.Contains("JOSE header", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(System.Security.Cryptography.X509Certificates.X509ContentType.Pkcs12)]
+    [InlineData(System.Security.Cryptography.X509Certificates.X509ContentType.Pkcs7)]
+    public async Task VerifyAsync_AnX5cEntryThatIsABundleAroundTheSigner_IsRefused(
+        System.Security.Cryptography.X509Certificates.X509ContentType type)
+    {
+        // SPEC: RFC 7515 §4.1.6, each x5c entry is one DER certificate. The signer's own certificate wrapped in a
+        // bundle would verify if the bundle were read as the certificate inside it.
+        var builder = new TestCredentialBuilder
+        {
+            RewriteHeaderJson = json =>
+            {
+                var header = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+                var der = Convert.FromBase64String(header["x5c"]![0]!.GetValue<string>());
+#if NET9_0_OR_GREATER
+                using var signer = System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadCertificate(der);
+#else
+                using var signer = new System.Security.Cryptography.X509Certificates.X509Certificate2(der);
+#endif
+                var bundle = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection(signer).Export(type)!;
+                header["x5c"] = new System.Text.Json.Nodes.JsonArray(Convert.ToBase64String(bundle));
+                return header.ToJsonString();
+            },
+        };
+
+        var result = await VerifyAsync(builder);
+
+        Assert.False(result.IsValid);
+        Assert.Contains(result.Errors, e => e.Code == ErrorCodes.IssuerKeyUnresolvable
+                                            && e.Message.Contains("DER certificate chain", StringComparison.Ordinal));
     }
 
     [Fact]

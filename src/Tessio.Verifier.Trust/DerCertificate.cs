@@ -1,18 +1,23 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
-namespace Tessio.Verifier.Core.Mdoc;
+namespace Tessio.Verifier.Trust;
 
 /// <summary>
-/// Loads an X.509 certificate that must be exactly one DER-encoded certificate. The platform loaders also
-/// accept PEM, and on .NET 8 PKCS#7 and PKCS#12 too, whose key derivation costs work on every load, so the
-/// content type is checked before loading, and the certificate's own encoding must then reproduce the input
-/// byte for byte, which refuses every wrapping around it.
+/// Loads an X.509 certificate that must be exactly one certificate, with nothing around it or after it. The
+/// platform loaders also accept PEM, and on .NET 8 PKCS#7 and PKCS#12 too, so there the content type is checked
+/// before loading; on later frameworks the loader takes a single certificate alone. On every framework the
+/// certificate's own encoding must then reproduce the input byte for byte, which refuses every wrapping and every
+/// trailing byte. The bytes it is given are therefore
+/// the bytes it returns, which is what a thumbprint is computed over and what the trust seam judges. The one
+/// loader the library uses for a certificate that arrives from outside: a second, laxer one is where a presented
+/// certificate would slip past this.
 /// </summary>
 // SPEC: RFC 9360 section 2, x5chain carries DER certificates; ISO/IEC 18013-5 likewise ("DER encoded").
+// RFC 7515 section 4.1.6, each x5c entry is "a base64-encoded ... DER PKIX certificate value".
 internal static class DerCertificate
 {
-    /// <exception cref="CryptographicException">The bytes are not exactly one DER certificate.</exception>
+    /// <exception cref="CryptographicException">The bytes are not exactly one certificate.</exception>
     public static X509Certificate2 Load(byte[] der)
     {
         // Refused here rather than handed on: on .NET 8 an empty array makes the content-type check throw an

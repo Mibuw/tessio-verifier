@@ -203,7 +203,7 @@ public sealed class StaticTrustListResolver : ITrustListResolver
     private (bool Anchored, string? Because, MatchedAnchor? Anchor) ChainAnchorsOnConfiguredRoot(
         ReadOnlyMemory<byte>[] x5c)
     {
-        var certificates = x5c.Select(der => LoadCertificate(der.ToArray())).ToList();
+        var certificates = x5c.Select(der => DerCertificate.Load(der.ToArray())).ToList();
         try
         {
             var leaf = certificates[0];
@@ -402,13 +402,6 @@ public sealed class StaticTrustListResolver : ITrustListResolver
         return nowUtc >= certificate.NotBefore.ToUniversalTime()
             && nowUtc <= certificate.NotAfter.ToUniversalTime();
     }
-
-    private static X509Certificate2 LoadCertificate(byte[] der) =>
-#if NET9_0_OR_GREATER
-        X509CertificateLoader.LoadCertificate(der);
-#else
-        new(der);
-#endif
 
     /// <param name="anchor">
     /// The anchor that vouched for the key, or null on the identifier route, where the list carried the

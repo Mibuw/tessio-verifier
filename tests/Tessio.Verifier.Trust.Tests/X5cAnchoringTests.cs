@@ -110,6 +110,23 @@ public sealed class X5cAnchoringTests : IDisposable
     }
 
     /// <summary>
+    /// The chain is "DER-encoded, leaf first" (ITrustListResolver), so an entry that is anything else is not
+    /// read as one. A bundle around the pinned leaf is the case that matters: a laxer loader takes the leaf
+    /// out of it and trusts the bundle.
+    /// </summary>
+    [Theory]
+    [InlineData(X509ContentType.Pkcs12)]
+    [InlineData(X509ContentType.Pkcs7)]
+    public async Task X5c_EntryThatIsABundleAroundThePinnedLeaf_IsNotReadAsACertificate(X509ContentType type)
+    {
+        var resolver = new StaticTrustListResolver([Issuer], trustAnchors: [_legitCert]);
+        var bundle = new X509Certificate2Collection(_legitCert).Export(type)!;
+
+        await Assert.ThrowsAsync<CryptographicException>(
+            () => resolver.ResolveAsync(Issuer, [new ReadOnlyMemory<byte>(bundle)]));
+    }
+
+    /// <summary>
     /// A trusted verdict has to say WHICH anchor produced it, by bytes, not only that one did.
     /// </summary>
     /// <remarks>

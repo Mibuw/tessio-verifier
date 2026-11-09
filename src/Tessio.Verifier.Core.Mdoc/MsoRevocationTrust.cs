@@ -57,7 +57,7 @@ internal static class MsoRevocationTrust
         List<X509Certificate2> chain = [], credentialChain = [];
         try
         {
-            chain.AddRange(token.CertificateChain.Select(der => LoadCertificate(der.ToArray())));
+            chain.AddRange(token.CertificateChain.Select(der => DerCertificate.Load(der.ToArray())));
             using (var path = BuildWithNothingTrusted(chain[0], chain.Skip(1), clock))
             {
                 if (!PathHolds(path, chain))
@@ -69,14 +69,14 @@ internal static class MsoRevocationTrust
 
             if (reference.Certificate is { } certificate)
             {
-                using var named = LoadCertificate(certificate);
+                using var named = DerCertificate.Load(certificate);
                 return ExtendsTo(chain, named, clock)
                     ? null
                     : Error(ErrorCodes.StatusInvalid,
                         "The MSO revocation list's chain does not anchor on the certificate its MSO reference names.");
             }
 
-            credentialChain.AddRange(credential.DocumentSignerChain.Select(der => LoadCertificate(der.ToArray())));
+            credentialChain.AddRange(credential.DocumentSignerChain.Select(der => DerCertificate.Load(der.ToArray())));
             return await AnchorsOnDocumentSignerIssuerAsync(token, chain, credentialChain, credential.Trust, resolver, clock, ct)
                 .ConfigureAwait(false);
         }
@@ -278,8 +278,6 @@ internal static class MsoRevocationTrust
         certificate.Extensions["2.5.29.35"] is { } extension
             ? new X509AuthorityKeyIdentifierExtension(extension.RawData, extension.Critical).KeyIdentifier?.ToArray()
             : null;
-
-    private static X509Certificate2 LoadCertificate(byte[] der) => DerCertificate.Load(der);
 
     private static VerificationError Error(string code, string message) => new() { Code = code, Message = message };
 }
