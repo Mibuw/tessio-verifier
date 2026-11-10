@@ -33,6 +33,8 @@ public class ContractSmokeTests
         Assert.Null(options.State);
         Assert.Null(options.RequestLifetime);
         Assert.Null(options.ClientMetadataJson);
+        Assert.Null(options.TransactionDataJson);
+        Assert.Null(options.VerifierInfoJson);
     }
 
     [Fact]
@@ -49,10 +51,12 @@ public class ContractSmokeTests
             RequestLifetime = TimeSpan.FromSeconds(90),
             ClientMetadataJson = """{"client_name":"Example Verifier"}""",
             TransactionDataJson = """{"payment_id":"pay_123"}""",
+            VerifierInfoJson = """[{"format":"registration_cert","data":"eyJ0eXAiOiJyYy13cnArand0In0.e30.c2ln"}]""",
         };
         Assert.Equal(ResponseMode.DirectPost, options.ResponseMode);
         Assert.Equal(TimeSpan.FromSeconds(90), options.RequestLifetime);
         Assert.NotNull(options.ClientMetadataJson);
+        Assert.NotNull(options.VerifierInfoJson);
     }
 
     [Fact]

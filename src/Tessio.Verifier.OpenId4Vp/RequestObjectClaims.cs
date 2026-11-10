@@ -44,15 +44,21 @@ internal static class RequestObjectClaims
             payload["state"] = options.State;
         }
 
-        AddOptionalMembers(payload, options.ClientMetadataJson, options.TransactionDataJson);
+        AddOptionalMembers(
+            payload, options.ClientMetadataJson, options.TransactionDataJson, options.VerifierInfoJson);
         return payload;
     }
 
     /// <summary>
-    /// Adds <c>client_metadata</c> and <c>transaction_data</c> when given: members both transports carry,
-    /// written here once so a redirect request and a Digital Credentials API request encode them alike.
+    /// Adds <c>client_metadata</c>, <c>transaction_data</c> and <c>verifier_info</c> when given: members both
+    /// transports carry, written here once so a redirect request and a Digital Credentials API request encode
+    /// them alike.
     /// </summary>
-    public static void AddOptionalMembers(JsonObject payload, string? clientMetadataJson, string? transactionDataJson)
+    public static void AddOptionalMembers(
+        JsonObject payload,
+        string? clientMetadataJson,
+        string? transactionDataJson,
+        string? verifierInfoJson)
     {
         if (clientMetadataJson is not null)
         {
@@ -64,6 +70,15 @@ internal static class RequestObjectClaims
         if (transactionDataJson is not null)
         {
             payload["transaction_data"] = JsonNode.Parse(transactionDataJson);
+        }
+
+        // SPEC: OpenID4VP 1.0 §5.11 — verifier_info is an array of attestations about the verifier, each an
+        // object with format and data. It is passed through unparsed because §5.11 defines the payload per
+        // format, and a verifier that holds a signed attestation must deliver those exact bytes: the wallet
+        // checks the signature over them.
+        if (verifierInfoJson is not null)
+        {
+            payload["verifier_info"] = JsonNode.Parse(verifierInfoJson);
         }
     }
 }

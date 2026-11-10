@@ -51,6 +51,15 @@ public sealed record DcApiPresentationRequestOptions
     public string? TransactionDataJson { get; init; }
 
     /// <summary>
+    /// Optional <c>verifier_info</c> as a JSON string holding the array, as for
+    /// <see cref="PresentationRequestOptions.VerifierInfoJson"/>.
+    /// </summary>
+    // SPEC: OpenID4VP 1.0 §5.11. Appendix A.3.2.2 confines verifier_info to a signature object's protected
+    // header, and that is the multi-signature JSON serialization; this builder signs per A.3.2.1, where the
+    // JWS is the data object's request claim and the parameters are its payload, so it belongs here.
+    public string? VerifierInfoJson { get; init; }
+
+    /// <summary>
     /// The client identifier, including its prefix (for example <c>x509_hash:...</c> from
     /// <see cref="ClientIdentifier.X509Hash"/>). Set for a signed request, null for an unsigned one.
     /// </summary>

@@ -60,4 +60,15 @@ public sealed record PresentationRequestOptions
     /// for transaction-integrity scenarios (e.g., binding a presentation to a payment confirmation).
     /// </summary>
     public string? TransactionDataJson { get; init; }
+
+    /// <summary>
+    /// Optional attestations about the verifier (OpenID4VP <c>verifier_info</c>) as a JSON string holding the
+    /// array, passed through unparsed as <see cref="TransactionDataJson"/> is. The EUDI ecosystem carries a
+    /// relying-party registration certificate in one element: the EUDI reference implementation emits
+    /// <c>format</c> <c>"registration_cert"</c> with the certificate as <c>data</c>, a compact JWT whose
+    /// <c>typ</c> is <c>rc-wrp+jwt</c>. A wallet that enforces registration checks the requested claims against
+    /// the scope that certificate grants, and drops a request carrying none.
+    /// </summary>
+    // SPEC: OpenID4VP 1.0 §5.11 (Verifier Info), §5.1 (the request parameter).
+    public string? VerifierInfoJson { get; init; }
 }

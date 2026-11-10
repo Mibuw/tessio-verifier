@@ -81,7 +81,8 @@ public sealed class DcApiPresentationRequestBuilder
             ["nonce"] = options.Nonce,
             ["dcql_query"] = JsonNode.Parse(options.DcqlQueryJson),
         };
-        RequestObjectClaims.AddOptionalMembers(parameters, options.ClientMetadataJson, options.TransactionDataJson);
+        RequestObjectClaims.AddOptionalMembers(
+            parameters, options.ClientMetadataJson, options.TransactionDataJson, options.VerifierInfoJson);
 
         // Each rule below refuses here, where the mistake is made, a request no wallet could answer or no verifier
         // could bind.
